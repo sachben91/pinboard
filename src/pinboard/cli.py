@@ -240,7 +240,22 @@ def connections(
         query += " ORDER BY c.similarity DESC"
         rows = [dict(r) for r in db.execute(query).fetchall()]
 
-    emit(rows, link_only=link, as_json=as_json, pretty=pretty, select_fields=select, limit=n)
+    if as_json or link:
+        emit(rows, link_only=link, as_json=as_json, pretty=pretty, select_fields=select, limit=n)
+        return
+
+    # Human-readable: one block per connection
+    if not rows:
+        print_info("No connections found.")
+        return
+    if n:
+        rows = rows[:n]
+    for row in rows:
+        status = "[green]✓ confirmed[/green]" if row["confirmed"] else "[yellow]? pending[/yellow]"
+        console.print(f"\n[bold]{row['stream_title']}[/bold]  →  [magenta]{row['pin_title']}[/magenta]  {status}")
+        console.print(f"  [dim]id: {row['id']}  sim: {row['similarity']:.2f}  source: {row['source']}[/dim]")
+        if row["llm_note"]:
+            console.print(f"  [italic]{row['llm_note']}[/italic]")
 
 
 # ---------------------------------------------------------------------------

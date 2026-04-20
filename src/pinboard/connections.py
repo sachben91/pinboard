@@ -1,4 +1,4 @@
-"""Semantic connection detection between streams and pins."""
+"""Connection detection between streams and pins — Claude-first, embedding fallback."""
 
 from __future__ import annotations
 
@@ -13,58 +13,73 @@ def _new_id() -> str:
     return str(uuid.uuid4())
 
 
-def _llm_note(cfg, stream_excerpt: str, pin_excerpt: str) -> str | None:
+def _claude_judge(cfg, stream_excerpt: str, pin_excerpt: str) -> tuple[bool, str | None]:
+    """Ask Claude if two passages are conceptually connected.
+    Returns (is_connected, explanation)."""
     if not cfg.anthropic_api_key:
-        return None
+        return False, None
     try:
         import anthropic
         client = anthropic.Anthropic(api_key=cfg.anthropic_api_key)
         msg = client.messages.create(
             model=cfg.llm_model,
-            max_tokens=120,
+            max_tokens=200,
             messages=[{
                 "role": "user",
                 "content": (
-                    "In 1-2 sentences, explain the connection between these two passages.\n\n"
-                    f"Passage A (stream):\n{stream_excerpt[:600]}\n\n"
-                    f"Passage B (pin):\n{pin_excerpt[:600]}\n\n"
-                    "Connection:"
+                    "You are helping a person manage their personal knowledge.\n\n"
+                    "They have pinned the following as a current focus:\n"
+                    f"PIN:\n{pin_excerpt[:800]}\n\n"
+                    "They just captured this new item:\n"
+                    f"STREAM:\n{stream_excerpt[:800]}\n\n"
+                    "Are these conceptually connected in any meaningful way — "
+                    "even if the surface topics seem different? Think about underlying themes, "
+                    "questions, tensions, or ideas that both might be exploring.\n\n"
+                    "Reply with:\n"
+                    "CONNECTED: yes or no\n"
+                    "REASON: one or two sentences explaining why (or why not)"
                 ),
             }],
         )
-        return msg.content[0].text.strip()
+        text = msg.content[0].text.strip()
+        connected = "yes" in text.split("CONNECTED:")[-1].split("\n")[0].lower()
+        reason = None
+        if "REASON:" in text:
+            reason = text.split("REASON:")[-1].strip()
+        return connected, reason
     except Exception:
-        return None
+        return False, None
+
+
+def _embedding_fallback(cfg, stream_vec, pin_vec) -> tuple[bool, None]:
+    """Fall back to cosine similarity if no Anthropic key."""
+    sim = cosine_similarity(stream_vec, pin_vec)
+    return sim >= cfg.connection_threshold, None
 
 
 def auto_suggest(conn: sqlite3.Connection, stream_id: str, cfg) -> list[str]:
-    """Compute similarity vs active pins; create connection rows where above threshold.
+    """Check new stream against active pins using Claude (or embedding fallback).
     Returns list of created connection ids."""
     stream = conn.execute(
         "SELECT embedding, content_text FROM streams WHERE id = ?", (stream_id,)
     ).fetchone()
-    if not stream or not stream["embedding"]:
+    if not stream or not stream["content_text"]:
         return []
 
-    stream_vec = deserialize(stream["embedding"])
-    stream_excerpt = (stream["content_text"] or "")[:600]
+    stream_excerpt = (stream["content_text"] or "")[:800]
+    stream_vec = deserialize(stream["embedding"]) if stream["embedding"] else None
 
     active_pins = conn.execute(
         """
         SELECT p.id as pin_id, s.embedding, s.content_text
         FROM pins p
         JOIN streams s ON s.id = p.stream_id
-        WHERE p.unpinned_at IS NULL AND s.embedding IS NOT NULL
+        WHERE p.unpinned_at IS NULL
         """
     ).fetchall()
 
     created = []
     for pin_row in active_pins:
-        pin_vec = deserialize(pin_row["embedding"])
-        sim = cosine_similarity(stream_vec, pin_vec)
-        if sim < cfg.connection_threshold:
-            continue
-
         # Skip if connection already exists
         existing = conn.execute(
             "SELECT id FROM connections WHERE stream_id = ? AND pin_id = ?",
@@ -73,8 +88,23 @@ def auto_suggest(conn: sqlite3.Connection, stream_id: str, cfg) -> list[str]:
         if existing:
             continue
 
-        pin_excerpt = (pin_row["content_text"] or "")[:600]
-        note = _llm_note(cfg, stream_excerpt, pin_excerpt)
+        pin_excerpt = (pin_row["content_text"] or "")[:800]
+
+        # Use Claude if available, otherwise fall back to embeddings
+        if cfg.anthropic_api_key:
+            connected, note = _claude_judge(cfg, stream_excerpt, pin_excerpt)
+            sim = cosine_similarity(
+                deserialize(stream["embedding"]), deserialize(pin_row["embedding"])
+            ) if stream["embedding"] and pin_row["embedding"] else 0.0
+        elif stream_vec is not None and pin_row["embedding"]:
+            pin_vec = deserialize(pin_row["embedding"])
+            connected, note = _embedding_fallback(cfg, stream_vec, pin_vec)
+            sim = cosine_similarity(stream_vec, pin_vec)
+        else:
+            continue
+
+        if not connected:
+            continue
 
         conn_id = _new_id()
         conn.execute(
@@ -127,7 +157,6 @@ def manual_link(
         "SELECT id FROM connections WHERE stream_id = ? AND pin_id = ?", (stream_id, pin_id)
     ).fetchone()
     if existing:
-        # Promote to confirmed manual
         conn.execute(
             "UPDATE connections SET confirmed = TRUE, source = 'manual', llm_note = COALESCE(?, llm_note) WHERE id = ?",
             (note, existing["id"]),

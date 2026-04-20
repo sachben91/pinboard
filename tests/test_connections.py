@@ -1,6 +1,9 @@
 """Integration test: add → auto-suggest → confirm → graph."""
 
-import struct
+from __future__ import annotations
+
+from unittest.mock import patch
+
 import numpy as np
 import pytest
 
@@ -17,48 +20,78 @@ def _vec(values: list[float]) -> bytes:
     return serialize(arr)
 
 
-def _insert_stream_with_embedding(db, title: str, url: str, vec_values: list[float]) -> str:
+def _insert_stream_with_text(db, title: str, url: str, text: str, vec_values: list[float] | None = None) -> str:
     sid = add_stream(db, url, title=title)
-    db.execute("UPDATE streams SET embedding = ?, content_text = ? WHERE id = ?",
-               (_vec(vec_values), f"text about {title}", sid))
+    emb = _vec(vec_values) if vec_values else None
+    db.execute("UPDATE streams SET embedding = ?, content_text = ? WHERE id = ?", (emb, text, sid))
     return sid
 
 
-def test_auto_suggest_creates_connection(db_path, cfg):
-    """High-similarity stream vs pin should create a pending connection."""
-    cfg.connection_threshold = 0.5
-    with get_conn(db_path) as db:
-        pin_sid = _insert_stream_with_embedding(db, "Pin Topic", "https://p.com", [1.0, 0.0, 0.0])
-        pin_id = pin_stream(db, pin_sid)
+def _cfg_with_claude(connected: bool, reason: str = "Thematically linked.") -> Config:
+    """Config with mocked Claude that always returns a fixed judgment."""
+    cfg = Config()
+    cfg.anthropic_api_key = "fake-key"
+    return cfg, connected, reason
 
-        new_sid = _insert_stream_with_embedding(db, "Related Stream", "https://r.com", [0.9, 0.1, 0.0])
+
+def test_auto_suggest_claude_connected(db_path):
+    """Claude says connected → connection row created."""
+    cfg = Config()
+    cfg.anthropic_api_key = "fake"
+
+    with get_conn(db_path) as db:
+        pin_sid = _insert_stream_with_text(db, "Pin", "https://p.com", "text about memory and identity")
+        pin_stream(db, pin_sid)
+        new_sid = _insert_stream_with_text(db, "Stream", "https://s.com", "text about arousal and history")
+
+        with patch("pinboard.connections._claude_judge", return_value=(True, "Both explore the body as a site of memory.")):
+            created = auto_suggest(db, new_sid, cfg)
+
+    assert len(created) == 1
+
+
+def test_auto_suggest_claude_not_connected(db_path):
+    """Claude says not connected → no connection row."""
+    cfg = Config()
+    cfg.anthropic_api_key = "fake"
+
+    with get_conn(db_path) as db:
+        pin_sid = _insert_stream_with_text(db, "Pin", "https://p.com", "text about memory")
+        pin_stream(db, pin_sid)
+        new_sid = _insert_stream_with_text(db, "Stream", "https://s.com", "text about cooking recipes")
+
+        with patch("pinboard.connections._claude_judge", return_value=(False, "No meaningful connection.")):
+            created = auto_suggest(db, new_sid, cfg)
+
+    assert len(created) == 0
+
+
+def test_auto_suggest_embedding_fallback(db_path):
+    """No Anthropic key → falls back to cosine similarity."""
+    cfg = Config()
+    cfg.anthropic_api_key = ""
+    cfg.connection_threshold = 0.5
+
+    with get_conn(db_path) as db:
+        pin_sid = _insert_stream_with_text(db, "Pin", "https://p.com", "text", [1.0, 0.0, 0.0])
+        pin_stream(db, pin_sid)
+        new_sid = _insert_stream_with_text(db, "Related", "https://r.com", "text", [0.9, 0.1, 0.0])
         created = auto_suggest(db, new_sid, cfg)
 
     assert len(created) == 1
 
 
-def test_auto_suggest_below_threshold_no_connection(db_path, cfg):
-    cfg.connection_threshold = 0.9
+def test_confirm_connection(db_path):
+    cfg = Config()
+    cfg.anthropic_api_key = "fake"
+
     with get_conn(db_path) as db:
-        pin_sid = _insert_stream_with_embedding(db, "Pin Topic", "https://p.com", [1.0, 0.0, 0.0])
+        pin_sid = _insert_stream_with_text(db, "Pin", "https://p.com", "text about memory")
         pin_stream(db, pin_sid)
+        new_sid = _insert_stream_with_text(db, "Stream", "https://s.com", "text about history")
 
-        new_sid = _insert_stream_with_embedding(db, "Unrelated Stream", "https://u.com", [0.0, 1.0, 0.0])
-        created = auto_suggest(db, new_sid, cfg)
-
-    assert len(created) == 0
-
-
-def test_confirm_connection(db_path, cfg):
-    cfg.connection_threshold = 0.5
-    with get_conn(db_path) as db:
-        pin_sid = _insert_stream_with_embedding(db, "Pin", "https://p.com", [1.0, 0.0])
-        pin_stream(db, pin_sid)
-        new_sid = _insert_stream_with_embedding(db, "Related", "https://r.com", [0.9, 0.1])
-
-        created = auto_suggest(db, new_sid, cfg)
-        assert created
-        conn_id = created[0]
+        with patch("pinboard.connections._claude_judge", return_value=(True, "Connected.")):
+            [conn_id] = auto_suggest(db, new_sid, cfg)
 
         row = db.execute("SELECT confirmed FROM connections WHERE id = ?", (conn_id,)).fetchone()
         assert not row["confirmed"]
@@ -67,28 +100,28 @@ def test_confirm_connection(db_path, cfg):
         row = db.execute("SELECT confirmed FROM connections WHERE id = ?", (conn_id,)).fetchone()
         assert row["confirmed"]
 
-        # Verify event was logged
-        ev = db.execute(
-            "SELECT event_type FROM events WHERE event_type = 'confirm_connection'"
-        ).fetchone()
+        ev = db.execute("SELECT event_type FROM events WHERE event_type = 'confirm_connection'").fetchone()
         assert ev is not None
 
 
-def test_reject_connection_deletes(db_path, cfg):
-    cfg.connection_threshold = 0.5
+def test_reject_connection_deletes(db_path):
+    cfg = Config()
+    cfg.anthropic_api_key = "fake"
+
     with get_conn(db_path) as db:
-        pin_sid = _insert_stream_with_embedding(db, "Pin", "https://p.com", [1.0, 0.0])
+        pin_sid = _insert_stream_with_text(db, "Pin", "https://p.com", "text")
         pin_stream(db, pin_sid)
-        new_sid = _insert_stream_with_embedding(db, "Related", "https://r.com", [0.9, 0.1])
+        new_sid = _insert_stream_with_text(db, "Stream", "https://s.com", "text")
 
-        [conn_id] = auto_suggest(db, new_sid, cfg)
+        with patch("pinboard.connections._claude_judge", return_value=(True, "Connected.")):
+            [conn_id] = auto_suggest(db, new_sid, cfg)
+
         reject_connection(db, conn_id)
-
         row = db.execute("SELECT id FROM connections WHERE id = ?", (conn_id,)).fetchone()
         assert row is None
 
 
-def test_manual_link(db_path, cfg):
+def test_manual_link(db_path):
     with get_conn(db_path) as db:
         pin_sid = add_stream(db, "https://p.com", title="Pin")
         pin_id = pin_stream(db, pin_sid)

@@ -2,6 +2,21 @@
 
 A local-first personal pinning & streams system. Combine **intentional focus** (pins) with **emergent discovery** (engagement-based lab scoring).
 
+## Claude Code Skill
+
+If you use [Claude Code](https://claude.ai/code), a `/pinboard` slash command is included. Open Claude Code from this directory and use natural language instead of CLI commands:
+
+```
+/pinboard add https://some-article.com
+/pinboard pin the last one I added
+/pinboard show my pending connections
+/pinboard what's gaining traction in my lab
+```
+
+Claude will figure out the right command and run it for you.
+
+The skill lives at `.claude/commands/pinboard.md` and is automatically available when you open Claude Code from the project directory.
+
 ## Install
 
 ```bash
