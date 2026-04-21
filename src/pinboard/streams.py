@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 import sqlite3
 import uuid
-from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -15,6 +15,15 @@ from .events import record, now_utc
 
 def _new_id() -> str:
     return str(uuid.uuid4())
+
+
+def _channel_dir(channel_id: str, conn: sqlite3.Connection) -> Path:
+    """Return artifacts/<channel-name>/, creating it if needed."""
+    row = conn.execute("SELECT name FROM channels WHERE id = ?", (channel_id,)).fetchone()
+    name = re.sub(r"[^\w\-]", "-", (row["name"] if row else channel_id)).lower()
+    path = ARTIFACTS_DIR / name
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def _detect_kind(source: str) -> str:
@@ -30,7 +39,7 @@ def _detect_kind(source: str) -> str:
     return "doc"
 
 
-def _fetch_url(url: str, cache: bool = False) -> tuple[str, str | None, str | None]:
+def _fetch_url(url: str, artifact_dir: Path, cache: bool = False) -> tuple[str, str | None, str | None]:
     """Returns (title, content_text, artifact_path)."""
     try:
         import trafilatura
@@ -40,20 +49,16 @@ def _fetch_url(url: str, cache: bool = False) -> tuple[str, str | None, str | No
         title = (metadata.title if metadata and metadata.title else None) or url
         artifact_path = None
         if cache and downloaded:
-            ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
-            aid = _new_id()
-            artifact_path = str(ARTIFACTS_DIR / f"{aid}.html")
+            artifact_path = str(artifact_dir / f"{_new_id()}.html")
             Path(artifact_path).write_text(downloaded, encoding="utf-8")
         return title, content, artifact_path
     except Exception:
         return url, None, None
 
 
-def _ingest_pdf(source: str) -> tuple[str, str | None, str]:
+def _ingest_pdf(source: str, artifact_dir: Path) -> tuple[str, str | None, str]:
     """Returns (title, content_text, artifact_path)."""
-    ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
-    aid = _new_id()
-    artifact_path = str(ARTIFACTS_DIR / f"{aid}.pdf")
+    artifact_path = str(artifact_dir / f"{_new_id()}.pdf")
     shutil.copy2(source, artifact_path)
 
     content = None
@@ -65,16 +70,13 @@ def _ingest_pdf(source: str) -> tuple[str, str | None, str]:
     except Exception:
         pass
 
-    title = Path(source).stem
-    return title, content, artifact_path
+    return Path(source).stem, content, artifact_path
 
 
-def _ingest_image(source: str) -> tuple[str, str]:
+def _ingest_image(source: str, artifact_dir: Path) -> tuple[str, str]:
     """Returns (title, artifact_path)."""
-    ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
     suffix = Path(source).suffix
-    aid = _new_id()
-    artifact_path = str(ARTIFACTS_DIR / f"{aid}{suffix}")
+    artifact_path = str(artifact_dir / f"{_new_id()}{suffix}")
     shutil.copy2(source, artifact_path)
     return Path(source).stem, artifact_path
 
@@ -95,15 +97,16 @@ def add_stream(
     artifact_path = None
     content_text = None
     embedding_blob = None
+    artifact_dir = _channel_dir(channel_id, conn)
 
     if kind == "url":
-        fetched_title, content_text, artifact_path = _fetch_url(source, cache=cache)
+        fetched_title, content_text, artifact_path = _fetch_url(source, artifact_dir, cache=cache)
         title = title or fetched_title
     elif kind == "pdf":
-        fetched_title, content_text, artifact_path = _ingest_pdf(source)
+        fetched_title, content_text, artifact_path = _ingest_pdf(source, artifact_dir)
         title = title or fetched_title
     elif kind == "image":
-        fetched_title, artifact_path = _ingest_image(source)
+        fetched_title, artifact_path = _ingest_image(source, artifact_dir)
         title = title or fetched_title
     else:
         p = Path(source)
