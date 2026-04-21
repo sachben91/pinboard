@@ -675,5 +675,47 @@ def export_data(
     print(json.dumps(out, indent=2, default=str))
 
 
+# ---------------------------------------------------------------------------
+# digest
+# ---------------------------------------------------------------------------
+
+@app.command()
+def digest(
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print digest without sending"),
+):
+    """Generate and send the daily Claude-curated reading digest via Telegram."""
+    _ensure_init()
+    cfg = Config.load()
+    from .digest import build_digest, render_telegram, render_plain, send_telegram
+    from datetime import datetime, timezone
+
+    print_info("Building digest…")
+    with get_conn(DB_PATH) as db:
+        data = build_digest(db, cfg)
+
+    if not data:
+        print_info("No streams to digest yet. Add some streams first.")
+        return
+
+    date_str = datetime.now(timezone.utc).strftime("%A, %B %-d %Y")
+    tg_message = render_telegram(data, date_str)
+    plain = render_plain(data, date_str)
+
+    if dry_run:
+        console.print(plain)
+        return
+
+    if not cfg.extra.get("telegram_bot_token") or not cfg.extra.get("telegram_chat_id"):
+        print_error("Telegram not configured. Add telegram_bot_token and telegram_chat_id to ~/.pinboard/config.toml")
+        raise typer.Exit(1)
+
+    ok = send_telegram(cfg, tg_message)
+    if ok:
+        print_success(f"Digest sent to Telegram ({len(data)} channel(s))")
+    else:
+        print_error("Failed to send Telegram message. Check your token and chat_id.")
+        raise typer.Exit(1)
+
+
 if __name__ == "__main__":
     app()
