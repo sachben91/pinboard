@@ -26,6 +26,39 @@ def stream_score(conn: sqlite3.Connection, stream_id: str, half_life_days: float
     return sum(math.exp(-_age_days(r["occurred_at"]) / half_life_days) for r in rows)
 
 
+def pin_relevance_score(
+    conn: sqlite3.Connection, stream_id: str, channel_id: str
+) -> float:
+    """Cosine similarity between a stream and the average of active pin embeddings.
+    Returns 0.0 if embeddings are missing."""
+    from .embeddings import deserialize, cosine_similarity
+    import numpy as np
+
+    stream = conn.execute(
+        "SELECT embedding FROM streams WHERE id = ?", (stream_id,)
+    ).fetchone()
+    if not stream or not stream["embedding"]:
+        return 0.0
+
+    stream_vec = deserialize(stream["embedding"])
+
+    pin_embeddings = conn.execute(
+        """
+        SELECT s.embedding FROM pins p
+        JOIN streams s ON s.id = p.stream_id
+        WHERE p.channel_id = ? AND p.unpinned_at IS NULL AND s.embedding IS NOT NULL
+        """,
+        (channel_id,),
+    ).fetchall()
+
+    if not pin_embeddings:
+        return 0.0
+
+    vecs = [deserialize(r["embedding"]) for r in pin_embeddings]
+    avg_pin_vec = np.mean(vecs, axis=0)
+    return round(cosine_similarity(stream_vec, avg_pin_vec), 3)
+
+
 def lab_scores(
     conn: sqlite3.Connection, channel_id: str, half_life_days: float = 14.0, limit: int = 20
 ) -> list[dict]:
@@ -60,6 +93,7 @@ def lab_scores(
             "open_count": len(opens),
             "last_opened": last_opened or "",
             "created_at": row["created_at"],
+            "pin_score": pin_relevance_score(conn, sid, channel_id),
         })
 
     results.sort(key=lambda r: r["score"], reverse=True)

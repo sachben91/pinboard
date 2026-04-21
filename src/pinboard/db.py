@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -42,6 +42,18 @@ CREATE TABLE IF NOT EXISTS pins (
     slot_order INTEGER NOT NULL,
     note TEXT
 );
+
+CREATE TABLE IF NOT EXISTS pin_skills (
+    id TEXT PRIMARY KEY,
+    pin_id TEXT NOT NULL REFERENCES pins(id),
+    themes TEXT NOT NULL,           -- JSON array
+    questions TEXT NOT NULL,        -- JSON array
+    adjacent TEXT NOT NULL,         -- JSON array
+    search_signals TEXT NOT NULL,   -- JSON array of targeted query strings
+    created_at TIMESTAMP NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_pin_skills_pin ON pin_skills(pin_id);
 
 CREATE TABLE IF NOT EXISTS connections (
     id TEXT PRIMARY KEY,
@@ -97,6 +109,19 @@ ALTER TABLE events ADD COLUMN channel_id TEXT;
 UPDATE events SET channel_id = '00000000-0000-0000-0000-000000000001' WHERE channel_id IS NULL;
 """
 
+MIGRATION_V2_TO_V3 = """
+CREATE TABLE IF NOT EXISTS pin_skills (
+    id TEXT PRIMARY KEY,
+    pin_id TEXT NOT NULL REFERENCES pins(id),
+    themes TEXT NOT NULL,
+    questions TEXT NOT NULL,
+    adjacent TEXT NOT NULL,
+    search_signals TEXT NOT NULL,
+    created_at TIMESTAMP NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pin_skills_pin ON pin_skills(pin_id);
+"""
+
 DEFAULT_CHANNEL_ID = "00000000-0000-0000-0000-000000000001"
 DEFAULT_CHANNEL_NAME = "default"
 
@@ -130,7 +155,6 @@ def init_db(db_path: Path) -> None:
 
 def _migrate(conn: sqlite3.Connection, from_version: int) -> None:
     if from_version < 2:
-        # Run each statement individually to handle "duplicate column" errors gracefully
         stmts = [s.strip() for s in MIGRATION_V1_TO_V2.split(";") if s.strip()]
         for stmt in stmts:
             try:
@@ -139,6 +163,13 @@ def _migrate(conn: sqlite3.Connection, from_version: int) -> None:
                 if "duplicate column" in str(e).lower():
                     continue
                 raise
+    if from_version < 3:
+        stmts = [s.strip() for s in MIGRATION_V2_TO_V3.split(";") if s.strip()]
+        for stmt in stmts:
+            try:
+                conn.execute(stmt)
+            except sqlite3.OperationalError:
+                pass
 
 
 @contextmanager

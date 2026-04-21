@@ -23,7 +23,8 @@ from . import pins as pin_mod
 from . import streams as stream_mod
 from .events import record, now_utc
 from .output import emit, print_error, print_success, print_info
-from .scoring import lab_scores, stream_score
+from .scoring import lab_scores, stream_score, pin_relevance_score
+from . import skills as skills_mod
 
 app = typer.Typer(help="Pinboard: local-first personal pinning & streams system.", no_args_is_help=True)
 console = Console()
@@ -211,7 +212,15 @@ def list_streams(
                 """,
                 (channel_id, channel_id),
             ).fetchall()
-            rows += [dict(r) | {"pinned": "", "slot": "", "channel": channel_name} for r in recent]
+            rows += [
+                dict(r) | {
+                    "pinned": "",
+                    "slot": "",
+                    "channel": channel_name,
+                    "pin_score": pin_relevance_score(db, r["id"], channel_id),
+                }
+                for r in recent
+            ]
 
     if not link and not as_json and not pins_only:
         console.print(f"\n[bold cyan]Channel: {channel_name}[/bold cyan]  [dim](3 pin max)[/dim]")
@@ -242,7 +251,23 @@ def pin(
             print_error(str(e))
             raise typer.Exit(1)
 
+        # Generate pin skill in the same transaction
+        stream_row = db.execute(
+            "SELECT title, content_text FROM streams WHERE id = ?", (stream_id,)
+        ).fetchone()
+
     print_success(f"[{channel_name}] Pinned stream {stream_id}  pin_id={pin_id}")
+
+    if stream_row and stream_row["content_text"]:
+        print_info("Generating pin skill…")
+        cfg = Config.load()
+        skill = skills_mod.generate_skill(cfg, pin_id, stream_row["title"], stream_row["content_text"])
+        if skill:
+            with get_conn(DB_PATH) as db:
+                skills_mod.save_skill(db, pin_id, skill)
+            print_success(f"Skill generated: {len(skill.get('themes',[]))} themes, {len(skill.get('search_signals',[]))} search signals")
+            for t in skill.get("themes", []):
+                print_info(f"  · {t}")
 
 
 @app.command()
@@ -676,6 +701,38 @@ def export_data(
 
 
 # ---------------------------------------------------------------------------
+# skills
+# ---------------------------------------------------------------------------
+
+@app.command()
+def skills(
+    channel: Optional[str] = typer.Option(None, "--channel", "-c"),
+):
+    """Show the decomposed skills for all active pins in the channel."""
+    _ensure_init()
+    with get_conn(DB_PATH) as db:
+        channel_id, channel_name = _active_channel(db, channel)
+        all_skills = skills_mod.get_skills_for_channel(db, channel_id)
+
+    if not all_skills:
+        print_info(f"No skills yet in '{channel_name}'. Pin something to generate a skill.")
+        return
+
+    console.print(f"\n[bold cyan]Pin Skills — #{channel_name}[/bold cyan]\n")
+    for s in all_skills:
+        console.print(f"[bold magenta]★ {s['pin_title']}[/bold magenta]")
+        console.print(f"  [bold]Themes:[/bold] {', '.join(s['themes'])}")
+        console.print(f"  [bold]Questions:[/bold]")
+        for q in s["questions"]:
+            console.print(f"    · {q}")
+        console.print(f"  [bold]Adjacent:[/bold] {', '.join(s['adjacent'])}")
+        console.print(f"  [bold]Search signals:[/bold]")
+        for sig in s["search_signals"]:
+            console.print(f"    → {sig}")
+        console.print()
+
+
+# ---------------------------------------------------------------------------
 # digest
 # ---------------------------------------------------------------------------
 
@@ -686,7 +743,7 @@ def digest(
     """Generate and send the daily Claude-curated reading digest via Telegram."""
     _ensure_init()
     cfg = Config.load()
-    from .digest import build_digest, render_telegram, render_plain, send_telegram
+    from .digest import build_digest, render_plain, send_telegram
     from datetime import datetime, timezone
 
     print_info("Building digest…")
@@ -698,7 +755,6 @@ def digest(
         return
 
     date_str = datetime.now(timezone.utc).strftime("%A, %B %-d %Y")
-    tg_message = render_telegram(data, date_str)
     plain = render_plain(data, date_str)
 
     if dry_run:
@@ -709,9 +765,9 @@ def digest(
         print_error("Telegram not configured. Add telegram_bot_token and telegram_chat_id to ~/.pinboard/config.toml")
         raise typer.Exit(1)
 
-    ok = send_telegram(cfg, tg_message)
+    ok = send_telegram(cfg, data, date_str)
     if ok:
-        print_success(f"Digest sent to Telegram ({len(data)} channel(s))")
+        print_success(f"Digest sent to Telegram ({len(data)} channel(s) — one message each)")
     else:
         print_error("Failed to send Telegram message. Check your token and chat_id.")
         raise typer.Exit(1)
