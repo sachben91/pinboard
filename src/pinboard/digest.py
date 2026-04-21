@@ -1,31 +1,37 @@
-"""Daily digest: Claude picks 3 streams per channel worth reading."""
+"""Daily digest: 1 pick from your streams + 2 web discoveries related to it."""
 
 from __future__ import annotations
 
 import sqlite3
+import json
 from datetime import datetime, timezone
 
 from .scoring import lab_scores
 
 
-def _candidate_streams(conn: sqlite3.Connection, channel_id: str, limit: int = 20) -> list[dict]:
-    """Pool of candidates: mix of high lab scores and recent additions."""
-    by_score = lab_scores(conn, channel_id=channel_id, half_life_days=14.0, limit=limit)
+# ---------------------------------------------------------------------------
+# Stream pick
+# ---------------------------------------------------------------------------
 
-    # Also grab recently added streams not already in the score list
-    score_ids = {r["id"] for r in by_score}
-    recent = conn.execute(
+def _pin_context(conn: sqlite3.Connection, channel_id: str) -> list[dict]:
+    rows = conn.execute(
         """
-        SELECT s.id, s.title, s.kind, s.source, s.content_text, s.created_at
-        FROM streams s
-        WHERE s.channel_id = ?
-          AND s.id NOT IN (SELECT stream_id FROM pins WHERE channel_id = ? AND unpinned_at IS NULL)
-          AND s.id NOT IN ({})
-        ORDER BY s.created_at DESC
-        LIMIT 10
-        """.format(",".join("?" * len(score_ids)) if score_ids else "SELECT NULL"),
-        [channel_id, channel_id] + list(score_ids),
-    ).fetchall() if score_ids else conn.execute(
+        SELECT s.title, s.content_text, p.note
+        FROM pins p JOIN streams s ON s.id = p.stream_id
+        WHERE p.channel_id = ? AND p.unpinned_at IS NULL
+        ORDER BY p.slot_order
+        """,
+        (channel_id,),
+    ).fetchall()
+    return [{"title": r["title"], "excerpt": (r["content_text"] or "")[:400], "note": r["note"]} for r in rows]
+
+
+def _candidate_streams(conn: sqlite3.Connection, channel_id: str) -> list[dict]:
+    """Unread streams ranked by lab score + recency."""
+    by_score = lab_scores(conn, channel_id=channel_id, half_life_days=14.0, limit=20)
+    score_ids = {r["id"] for r in by_score}
+
+    recent_rows = conn.execute(
         """
         SELECT s.id, s.title, s.kind, s.source, s.content_text, s.created_at
         FROM streams s
@@ -33,12 +39,12 @@ def _candidate_streams(conn: sqlite3.Connection, channel_id: str, limit: int = 2
           AND s.id NOT IN (SELECT stream_id FROM pins WHERE channel_id = ? AND unpinned_at IS NULL)
         ORDER BY s.created_at DESC LIMIT 10
         """,
-        [channel_id, channel_id],
+        (channel_id, channel_id),
     ).fetchall()
 
     combined = list(by_score)
-    seen = score_ids.copy()
-    for r in recent:
+    seen = set(score_ids)
+    for r in recent_rows:
         if r["id"] not in seen:
             combined.append({
                 "id": r["id"], "title": r["title"], "kind": r["kind"],
@@ -49,36 +55,17 @@ def _candidate_streams(conn: sqlite3.Connection, channel_id: str, limit: int = 2
     return combined
 
 
-def _pin_context(conn: sqlite3.Connection, channel_id: str) -> str:
-    rows = conn.execute(
-        """
-        SELECT s.title, s.content_text, p.note
-        FROM pins p JOIN streams s ON s.id = p.stream_id
-        WHERE p.channel_id = ? AND p.unpinned_at IS NULL
-        ORDER BY p.slot_order
-        """,
-        (channel_id,),
-    ).fetchall()
-    if not rows:
-        return "No active pins."
-    parts = []
-    for r in rows:
-        note = f" (pin note: {r['note']})" if r["note"] else ""
-        excerpt = (r["content_text"] or "")[:300]
-        parts.append(f"- {r['title']}{note}\n  {excerpt}")
-    return "\n".join(parts)
+def pick_stream(cfg, channel_name: str, pins: list[dict], candidates: list[dict]) -> dict | None:
+    """Ask Claude to pick the single most relevant stream from the candidates."""
+    if not candidates:
+        return None
+    if not cfg.anthropic_api_key:
+        return candidates[0]
 
-
-def claude_pick(cfg, channel_name: str, pin_context: str, candidates: list[dict]) -> list[dict]:
-    """Ask Claude to pick 3 streams and write a short note on each."""
-    if not cfg.anthropic_api_key or not candidates:
-        return candidates[:3]
-
-    candidate_list = "\n".join(
-        f"{i+1}. [{c['kind']}] {c['title']} (score={c['score']}, opens={c.get('open_count',0)})\n"
-        f"   URL: {c.get('source','')}\n"
-        f"   Excerpt: {(c.get('content_text') or '')[:200]}"
-        for i, c in enumerate(candidates[:15])
+    pin_ctx = "\n".join(f"- {p['title']}: {p['excerpt'][:200]}" for p in pins) or "No active pins."
+    cand_list = "\n".join(
+        f"{i+1}. {c['title']} (score={c['score']})\n   {(c.get('content_text') or '')[:200]}"
+        for i, c in enumerate(candidates[:12])
     )
 
     try:
@@ -86,63 +73,148 @@ def claude_pick(cfg, channel_name: str, pin_context: str, candidates: list[dict]
         client = anthropic.Anthropic(api_key=cfg.anthropic_api_key)
         msg = client.messages.create(
             model=cfg.llm_model,
-            max_tokens=600,
+            max_tokens=200,
             messages=[{
                 "role": "user",
                 "content": (
-                    f"You are curating a daily reading digest for the '{channel_name}' channel.\n\n"
-                    f"The user's current focus (pinned items):\n{pin_context}\n\n"
-                    f"Candidate streams to choose from:\n{candidate_list}\n\n"
-                    "Pick the 3 most worth reading today given the user's current focus. "
-                    "For each, write one sentence on why it's worth reading now.\n\n"
-                    "Reply in this exact format for each pick:\n"
-                    "PICK: <number from list>\n"
-                    "WHY: <one sentence>\n"
-                    "(repeat for all 3 picks)"
+                    f"Channel: {channel_name}\n"
+                    f"User's current pins (focus areas):\n{pin_ctx}\n\n"
+                    f"Candidate streams:\n{cand_list}\n\n"
+                    "Pick the single most interesting unread stream given the user's focus. "
+                    "Reply:\nPICK: <number>\nWHY: <one sentence>"
                 ),
             }],
         )
         text = msg.content[0].text.strip()
-        picks = []
-        for block in text.split("PICK:")[1:]:
-            lines = block.strip().splitlines()
-            try:
-                idx = int(lines[0].strip()) - 1
-                why = lines[1].replace("WHY:", "").strip() if len(lines) > 1 else ""
-                if 0 <= idx < len(candidates):
-                    entry = dict(candidates[idx])
-                    entry["why"] = why
-                    picks.append(entry)
-            except (ValueError, IndexError):
-                continue
-        return picks[:3] if picks else candidates[:3]
+        idx = int(text.split("PICK:")[-1].split("\n")[0].strip()) - 1
+        why = text.split("WHY:")[-1].strip() if "WHY:" in text else ""
+        if 0 <= idx < len(candidates):
+            return dict(candidates[idx]) | {"why": why}
     except Exception:
-        return [dict(c) | {"why": ""} for c in candidates[:3]]
+        pass
+    return dict(candidates[0]) | {"why": ""}
 
+
+# ---------------------------------------------------------------------------
+# Web discovery
+# ---------------------------------------------------------------------------
+
+def _search_queries(cfg, stream: dict, pins: list[dict]) -> list[str]:
+    """Ask Claude for 2 targeted search queries based on the picked stream."""
+    if not cfg.anthropic_api_key:
+        return [stream["title"]]
+
+    pin_titles = ", ".join(p["title"] for p in pins) or "none"
+    excerpt = (stream.get("content_text") or "")[:400]
+
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=cfg.anthropic_api_key)
+        msg = client.messages.create(
+            model=cfg.llm_model,
+            max_tokens=150,
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"A reader is focused on: {pin_titles}\n\n"
+                    f"They're reading: {stream['title']}\n{excerpt}\n\n"
+                    "Write 2 web search queries to find related articles or essays "
+                    "they haven't seen yet. Be specific — target the underlying themes, "
+                    "not just the surface topic.\n\n"
+                    "Reply with exactly 2 lines, one query per line, no numbering."
+                ),
+            }],
+        )
+        queries = [q.strip() for q in msg.content[0].text.strip().splitlines() if q.strip()]
+        return queries[:2]
+    except Exception:
+        return [stream["title"]]
+
+
+def _web_search(query: str, max_results: int = 5) -> list[dict]:
+    try:
+        from ddgs import DDGS
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=max_results))
+        return [{"title": r.get("title",""), "url": r.get("href",""), "snippet": r.get("body","")} for r in results]
+    except Exception:
+        return []
+
+
+def find_web_picks(cfg, stream: dict, pins: list[dict]) -> list[dict]:
+    """Run 2 searches and ask Claude to pick the best result from each."""
+    queries = _search_queries(cfg, stream, pins)
+    picks = []
+
+    for query in queries[:2]:
+        results = _web_search(query)
+        if not results:
+            continue
+
+        if not cfg.anthropic_api_key:
+            picks.append(dict(results[0]) | {"why": ""})
+            continue
+
+        results_txt = "\n".join(
+            f"{i+1}. {r['title']}\n   {r['url']}\n   {r['snippet'][:200]}"
+            for i, r in enumerate(results)
+        )
+        pin_titles = ", ".join(p["title"] for p in pins) or "none"
+
+        try:
+            import anthropic
+            client = anthropic.Anthropic(api_key=cfg.anthropic_api_key)
+            msg = client.messages.create(
+                model=cfg.llm_model,
+                max_tokens=150,
+                messages=[{
+                    "role": "user",
+                    "content": (
+                        f"User focus: {pin_titles}\n"
+                        f"They're reading: {stream['title']}\n\n"
+                        f"Search results for '{query}':\n{results_txt}\n\n"
+                        "Pick the most intellectually interesting result. "
+                        "Reply:\nPICK: <number>\nWHY: <one sentence>"
+                    ),
+                }],
+            )
+            text = msg.content[0].text.strip()
+            idx = int(text.split("PICK:")[-1].split("\n")[0].strip()) - 1
+            why = text.split("WHY:")[-1].strip() if "WHY:" in text else ""
+            if 0 <= idx < len(results):
+                picks.append(dict(results[idx]) | {"why": why})
+        except Exception:
+            picks.append(dict(results[0]) | {"why": ""})
+
+    return picks
+
+
+# ---------------------------------------------------------------------------
+# Build + render
+# ---------------------------------------------------------------------------
 
 def build_digest(conn: sqlite3.Connection, cfg) -> list[dict]:
-    """Build digest for all channels. Returns list of channel dicts with picks."""
+    """Build 1+2 digest for all channels."""
     channels = conn.execute("SELECT id, name FROM channels ORDER BY created_at").fetchall()
     result = []
     for ch in channels:
+        pins = _pin_context(conn, ch["id"])
         candidates = _candidate_streams(conn, ch["id"])
-        if not candidates:
+        stream_pick = pick_stream(cfg, ch["name"], pins, candidates)
+        if not stream_pick:
             continue
-        pin_ctx = _pin_context(conn, ch["id"])
-        picks = claude_pick(cfg, ch["name"], pin_ctx, candidates)
+        web_picks = find_web_picks(cfg, stream_pick, pins)
         result.append({
             "channel_id": ch["id"],
             "channel_name": ch["name"],
-            "pin_context": pin_ctx,
-            "picks": picks,
+            "stream_pick": stream_pick,
+            "web_picks": web_picks,
         })
     return result
 
 
 def send_telegram(cfg, message: str) -> bool:
-    """Send a message via Telegram bot. Returns True on success."""
-    import urllib.request
-    import urllib.parse
+    import urllib.request, urllib.parse
     token = cfg.extra.get("telegram_bot_token", "")
     chat_id = cfg.extra.get("telegram_chat_id", "")
     if not token or not chat_id:
@@ -163,54 +235,26 @@ def send_telegram(cfg, message: str) -> bool:
 
 
 def render_telegram(digest: list[dict], date_str: str) -> str:
-    """Render digest as Telegram HTML message."""
-    lines = [f"📌 <b>Pinboard Daily Digest</b>\n{date_str}\n"]
+    lines = [f"📌 <b>Pinboard Daily Digest</b> — {date_str}\n"]
     for ch in digest:
-        lines.append(f"\n<b>#{ch['channel_name']}</b>")
-        for i, p in enumerate(ch["picks"], 1):
-            url = p.get("source") or ""
-            title = p["title"]
-            link = f'<a href="{url}">{title}</a>' if url else f"<b>{title}</b>"
-            why = p.get("why", "")
-            lines.append(f"\n{i}. {link}")
-            if why:
-                lines.append(f"<i>{why}</i>")
+        lines.append(f"<b>#{ch['channel_name']}</b>\n")
+
+        sp = ch["stream_pick"]
+        url = sp.get("source") or ""
+        link = f'<a href="{url}">{sp["title"]}</a>' if url else f'<b>{sp["title"]}</b>'
+        lines.append(f"📖 From your streams:\n{link}")
+        if sp.get("why"):
+            lines.append(f"<i>{sp['why']}</i>")
+
+        for wp in ch.get("web_picks", []):
+            wurl = wp.get("url") or ""
+            wlink = f'<a href="{wurl}">{wp["title"]}</a>' if wurl else wp["title"]
+            lines.append(f"\n🌐 {wlink}")
+            if wp.get("why"):
+                lines.append(f"<i>{wp['why']}</i>")
+
+        lines.append("")
     return "\n".join(lines)
-
-
-def render_html(digest: list[dict], date_str: str) -> str:
-    """Render the digest as an HTML email."""
-    sections = ""
-    for ch in digest:
-        picks_html = ""
-        for p in ch["picks"]:
-            url = p.get("source") or ""
-            link = f'<a href="{url}">{p["title"]}</a>' if url else p["title"]
-            why = p.get("why", "")
-            picks_html += f"""
-            <div style="margin-bottom:20px; padding:12px; background:#f9f9f9; border-left:3px solid #7c3aed;">
-                <div style="font-size:15px; font-weight:600; margin-bottom:4px;">{link}</div>
-                <div style="font-size:13px; color:#555; font-style:italic;">{why}</div>
-                <div style="font-size:11px; color:#999; margin-top:4px;">{p.get('kind','').upper()}</div>
-            </div>"""
-
-        sections += f"""
-        <div style="margin-bottom:36px;">
-            <h2 style="font-size:16px; color:#7c3aed; border-bottom:1px solid #e5e7eb; padding-bottom:6px;">
-                #{ch['channel_name']}
-            </h2>
-            {picks_html}
-        </div>"""
-
-    return f"""<!DOCTYPE html>
-<html>
-<body style="font-family: -apple-system, sans-serif; max-width:600px; margin:0 auto; padding:24px; color:#111;">
-    <h1 style="font-size:20px; margin-bottom:4px;">📌 Pinboard Daily Digest</h1>
-    <p style="color:#888; font-size:13px; margin-bottom:32px;">{date_str}</p>
-    {sections}
-    <p style="color:#bbb; font-size:11px; margin-top:40px;">Sent by pinboard · your local knowledge system</p>
-</body>
-</html>"""
 
 
 def render_plain(digest: list[dict], date_str: str) -> str:
@@ -218,10 +262,18 @@ def render_plain(digest: list[dict], date_str: str) -> str:
     for ch in digest:
         lines.append(f"\n#{ch['channel_name']}")
         lines.append("-" * 40)
-        for i, p in enumerate(ch["picks"], 1):
-            lines.append(f"{i}. {p['title']}")
-            if p.get("source"):
-                lines.append(f"   {p['source']}")
-            if p.get("why"):
-                lines.append(f"   → {p['why']}")
+
+        sp = ch["stream_pick"]
+        lines.append(f"📖 From your streams: {sp['title']}")
+        if sp.get("source"):
+            lines.append(f"   {sp['source']}")
+        if sp.get("why"):
+            lines.append(f"   → {sp['why']}")
+
+        for wp in ch.get("web_picks", []):
+            lines.append(f"\n🌐 {wp['title']}")
+            if wp.get("url"):
+                lines.append(f"   {wp['url']}")
+            if wp.get("why"):
+                lines.append(f"   → {wp['why']}")
     return "\n".join(lines)
