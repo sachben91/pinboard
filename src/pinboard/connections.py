@@ -57,8 +57,8 @@ def _embedding_fallback(cfg, stream_vec, pin_vec) -> tuple[bool, None]:
     return sim >= cfg.connection_threshold, None
 
 
-def auto_suggest(conn: sqlite3.Connection, stream_id: str, cfg) -> list[str]:
-    """Check new stream against active pins using Claude (or embedding fallback).
+def auto_suggest(conn: sqlite3.Connection, stream_id: str, cfg, channel_id: str) -> list[str]:
+    """Check new stream against active pins in the channel using Claude (or embedding fallback).
     Returns list of created connection ids."""
     stream = conn.execute(
         "SELECT embedding, content_text FROM streams WHERE id = ?", (stream_id,)
@@ -74,8 +74,9 @@ def auto_suggest(conn: sqlite3.Connection, stream_id: str, cfg) -> list[str]:
         SELECT p.id as pin_id, s.embedding, s.content_text
         FROM pins p
         JOIN streams s ON s.id = p.stream_id
-        WHERE p.unpinned_at IS NULL
-        """
+        WHERE p.channel_id = ? AND p.unpinned_at IS NULL
+        """,
+        (channel_id,),
     ).fetchall()
 
     created = []

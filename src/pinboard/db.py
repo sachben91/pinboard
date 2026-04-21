@@ -7,15 +7,22 @@ from contextlib import contextmanager
 from pathlib import Path
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER PRIMARY KEY
 );
 
+CREATE TABLE IF NOT EXISTS channels (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    created_at TIMESTAMP NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS streams (
     id TEXT PRIMARY KEY,
+    channel_id TEXT NOT NULL REFERENCES channels(id),
     kind TEXT NOT NULL,
     title TEXT NOT NULL,
     source TEXT,
@@ -28,6 +35,7 @@ CREATE TABLE IF NOT EXISTS streams (
 
 CREATE TABLE IF NOT EXISTS pins (
     id TEXT PRIMARY KEY,
+    channel_id TEXT NOT NULL REFERENCES channels(id),
     stream_id TEXT NOT NULL REFERENCES streams(id),
     pinned_at TIMESTAMP NOT NULL,
     unpinned_at TIMESTAMP,
@@ -50,6 +58,7 @@ CREATE TABLE IF NOT EXISTS connections (
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     event_type TEXT NOT NULL,
+    channel_id TEXT,
     stream_id TEXT,
     pin_id TEXT,
     metadata_json TEXT,
@@ -59,17 +68,77 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_events_stream ON events(stream_id, occurred_at);
 CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type, occurred_at);
 CREATE INDEX IF NOT EXISTS idx_pins_active ON pins(unpinned_at) WHERE unpinned_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_streams_channel ON streams(channel_id);
+CREATE INDEX IF NOT EXISTS idx_pins_channel ON pins(channel_id, unpinned_at);
 """
+
+MIGRATION_V1_TO_V2 = """
+-- Add channels table if missing
+CREATE TABLE IF NOT EXISTS channels (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    created_at TIMESTAMP NOT NULL
+);
+
+-- Insert default channel
+INSERT OR IGNORE INTO channels (id, name, created_at)
+VALUES ('00000000-0000-0000-0000-000000000001', 'default', datetime('now'));
+
+-- Add channel_id to streams if missing
+ALTER TABLE streams ADD COLUMN channel_id TEXT REFERENCES channels(id);
+UPDATE streams SET channel_id = '00000000-0000-0000-0000-000000000001' WHERE channel_id IS NULL;
+
+-- Add channel_id to pins if missing
+ALTER TABLE pins ADD COLUMN channel_id TEXT REFERENCES channels(id);
+UPDATE pins SET channel_id = '00000000-0000-0000-0000-000000000001' WHERE channel_id IS NULL;
+
+-- Add channel_id to events if missing
+ALTER TABLE events ADD COLUMN channel_id TEXT;
+UPDATE events SET channel_id = '00000000-0000-0000-0000-000000000001' WHERE channel_id IS NULL;
+"""
+
+DEFAULT_CHANNEL_ID = "00000000-0000-0000-0000-000000000001"
+DEFAULT_CHANNEL_NAME = "default"
 
 
 def init_db(db_path: Path) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(db_path) as conn:
-        conn.executescript(DDL)
+        # Bootstrap: ensure schema_version exists so we can check it
+        conn.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)")
+        conn.commit()
+
         row = conn.execute("SELECT version FROM schema_version").fetchone()
         if row is None:
-            conn.execute("INSERT INTO schema_version VALUES (?)", (SCHEMA_VERSION,))
+            # Fresh DB
+            conn.executescript(DDL)
+            conn.execute(
+                "INSERT OR IGNORE INTO channels (id, name, created_at) VALUES (?, ?, datetime('now'))",
+                (DEFAULT_CHANNEL_ID, DEFAULT_CHANNEL_NAME),
+            )
+            conn.execute("INSERT OR IGNORE INTO schema_version VALUES (?)", (SCHEMA_VERSION,))
+        elif row[0] < SCHEMA_VERSION:
+            # Migrate first, then apply full DDL (adds missing indexes etc.)
+            _migrate(conn, row[0])
+            conn.executescript(DDL)
+            conn.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
+        else:
+            # Up to date — just ensure any missing tables/indexes exist
+            conn.executescript(DDL)
         conn.commit()
+
+
+def _migrate(conn: sqlite3.Connection, from_version: int) -> None:
+    if from_version < 2:
+        # Run each statement individually to handle "duplicate column" errors gracefully
+        stmts = [s.strip() for s in MIGRATION_V1_TO_V2.split(";") if s.strip()]
+        for stmt in stmts:
+            try:
+                conn.execute(stmt)
+            except sqlite3.OperationalError as e:
+                if "duplicate column" in str(e).lower():
+                    continue
+                raise
 
 
 @contextmanager

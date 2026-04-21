@@ -83,6 +83,7 @@ def add_stream(
     conn: sqlite3.Connection,
     source: str,
     *,
+    channel_id: str,
     title: str | None = None,
     note: str | None = None,
     cache: bool = False,
@@ -105,13 +106,11 @@ def add_stream(
         fetched_title, artifact_path = _ingest_image(source)
         title = title or fetched_title
     else:
-        # doc / note — source is used as-is or as a file path
         p = Path(source)
         if p.exists():
             content_text = p.read_text(errors="replace")
             title = title or p.stem
         else:
-            # treat raw text as a note
             content_text = source
             kind = "note"
             title = title or (source[:40] + "…" if len(source) > 40 else source)
@@ -126,10 +125,11 @@ def add_stream(
 
     conn.execute(
         """
-        INSERT INTO streams (id, kind, title, source, artifact_path, content_text, note, created_at, embedding)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO streams (id, channel_id, kind, title, source, artifact_path, content_text, note, created_at, embedding)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (stream_id, kind, title or source, source, artifact_path, content_text, note, now_utc(), embedding_blob),
+        (stream_id, channel_id, kind, title or source, source, artifact_path, content_text, note, now_utc(), embedding_blob),
     )
-    record(conn, "add", stream_id=stream_id, metadata={"kind": kind, "source": source})
+    record(conn, "add", stream_id=stream_id,
+           metadata={"kind": kind, "source": source, "channel_id": channel_id})
     return stream_id

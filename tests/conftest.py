@@ -1,11 +1,8 @@
 """Shared fixtures for pinboard tests."""
 
-import sqlite3
-from pathlib import Path
-
 import pytest
 
-from pinboard.db import init_db, get_conn
+from pinboard.db import init_db, get_conn, DEFAULT_CHANNEL_ID
 from pinboard.config import Config
 
 
@@ -18,21 +15,24 @@ def db_path(tmp_path):
 
 @pytest.fixture
 def db(db_path):
-    """Open a connection with autocommit-style context."""
     with get_conn(db_path) as conn:
         yield conn
 
 
 @pytest.fixture
 def cfg():
-    return Config()  # default config with no API keys
+    return Config()
+
+
+@pytest.fixture
+def channel_id():
+    return DEFAULT_CHANNEL_ID
 
 
 @pytest.fixture
 def prebuilt_db(tmp_path):
     """DB with known streams and open events for score testing."""
     from datetime import datetime, timezone, timedelta
-    from pinboard.db import init_db, get_conn
     from pinboard.streams import add_stream
     from pinboard.pins import pin_stream
 
@@ -40,12 +40,11 @@ def prebuilt_db(tmp_path):
     init_db(path)
 
     with get_conn(path) as conn:
-        # Add 3 streams
-        s1 = add_stream(conn, "https://example.com/a", title="Article A")
-        s2 = add_stream(conn, "https://example.com/b", title="Article B")
-        s3 = add_stream(conn, "https://example.com/c", title="Article C")
+        cid = DEFAULT_CHANNEL_ID
+        s1 = add_stream(conn, "https://example.com/a", channel_id=cid, title="Article A")
+        s2 = add_stream(conn, "https://example.com/b", channel_id=cid, title="Article B")
+        s3 = add_stream(conn, "https://example.com/c", channel_id=cid, title="Article C")
 
-        # Manually insert open events with controlled timestamps
         def insert_open(sid, days_ago):
             ts = (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat()
             conn.execute(
@@ -53,15 +52,10 @@ def prebuilt_db(tmp_path):
                 (sid, ts),
             )
 
-        # s1: opened 3 times (recent)
         insert_open(s1, 0)
         insert_open(s1, 1)
         insert_open(s1, 2)
-
-        # s2: opened once (2 weeks ago, at half-life boundary)
         insert_open(s2, 14)
-
-        # s3: opened once 30 days ago (heavily decayed)
         insert_open(s3, 30)
 
         return path, s1, s2, s3

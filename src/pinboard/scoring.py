@@ -19,7 +19,6 @@ def _age_days(occurred_at: str) -> float:
 
 
 def stream_score(conn: sqlite3.Connection, stream_id: str, half_life_days: float = 14.0) -> float:
-    """score = sum of exp(-age_in_days / half_life) for each open event."""
     rows = conn.execute(
         "SELECT occurred_at FROM events WHERE event_type = 'open' AND stream_id = ?",
         (stream_id,),
@@ -28,18 +27,19 @@ def stream_score(conn: sqlite3.Connection, stream_id: str, half_life_days: float
 
 
 def lab_scores(
-    conn: sqlite3.Connection, half_life_days: float = 14.0, limit: int = 20
+    conn: sqlite3.Connection, channel_id: str, half_life_days: float = 14.0, limit: int = 20
 ) -> list[dict]:
-    """Return unpinned streams ranked by score, with score, open_count, last_opened."""
-    # Streams not currently pinned
+    """Return unpinned streams in the channel ranked by engagement score."""
     rows = conn.execute(
         """
         SELECT s.id, s.title, s.kind, s.source, s.created_at
         FROM streams s
-        WHERE s.id NOT IN (
-            SELECT stream_id FROM pins WHERE unpinned_at IS NULL
-        )
-        """
+        WHERE s.channel_id = ?
+          AND s.id NOT IN (
+              SELECT stream_id FROM pins WHERE channel_id = ? AND unpinned_at IS NULL
+          )
+        """,
+        (channel_id, channel_id),
     ).fetchall()
 
     results = []
