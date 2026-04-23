@@ -1,0 +1,52 @@
+name: Daily Digest
+
+on:
+  schedule:
+    - cron: "0 13 * * *"  # 8am CT (UTC-5)
+  workflow_dispatch:
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -e ".[all]" 2>/dev/null || pip install -e .
+
+      - name: Install rclone
+        run: |
+          curl https://rclone.org/install.sh | sudo bash
+
+      - name: Configure rclone
+        run: |
+          mkdir -p ~/.config/rclone
+          echo "${{ secrets.RCLONE_CONF }}" > ~/.config/rclone/rclone.conf
+
+      - name: Pull DB from Google Drive
+        run: |
+          mkdir -p ~/.pinboard
+          rclone copy gdrive:pinboard/pinboard.db ~/.pinboard/
+
+      - name: Write pinboard config
+        run: |
+          cat > ~/.pinboard/config.toml <<EOF
+          anthropic_api_key = "${{ secrets.ANTHROPIC_API_KEY }}"
+          openai_api_key = "${{ secrets.OPENAI_API_KEY }}"
+          embedding_provider = "local"
+          embedding_model = "all-MiniLM-L6-v2"
+          telegram_bot_token = "${{ secrets.TELEGRAM_BOT_TOKEN }}"
+          telegram_chat_id = "${{ secrets.TELEGRAM_CHAT_ID }}"
+          EOF
+
+      - name: Run digest
+        run: python3 -m pinboard.cli digest
+
+      - name: Push DB back to Google Drive
+        if: always()
+        run: rclone copy ~/.pinboard/pinboard.db gdrive:pinboard/

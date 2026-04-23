@@ -12,7 +12,11 @@ from pathlib import Path
 
 PINBOARD_DIR = Path.home() / ".pinboard"
 CONFIG_PATH = PINBOARD_DIR / "config.toml"
-DB_PATH = PINBOARD_DIR / "pinboard.db"
+_GDRIVE_DB = (
+    Path.home()
+    / "Library/CloudStorage/GoogleDrive-sachben91@gmail.com/My Drive/pinboard/pinboard.db"
+)
+DB_PATH = _GDRIVE_DB if _GDRIVE_DB.parent.exists() else PINBOARD_DIR / "pinboard.db"
 ARTIFACTS_DIR = PINBOARD_DIR / "artifacts"
 
 
