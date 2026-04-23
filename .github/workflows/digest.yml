@@ -24,9 +24,11 @@ jobs:
           curl https://rclone.org/install.sh | sudo bash
 
       - name: Configure rclone
+        env:
+          RCLONE_CONF_CONTENT: ${{ secrets.RCLONE_CONF }}
         run: |
           mkdir -p ~/.config/rclone
-          echo "${{ secrets.RCLONE_CONF }}" > ~/.config/rclone/rclone.conf
+          printenv RCLONE_CONF_CONTENT > ~/.config/rclone/rclone.conf
 
       - name: Pull DB from Google Drive
         run: |
