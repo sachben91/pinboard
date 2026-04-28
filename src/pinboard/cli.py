@@ -169,6 +169,108 @@ def add(
 
 
 # ---------------------------------------------------------------------------
+# add-batch
+# ---------------------------------------------------------------------------
+
+@app.command("add-batch")
+def add_batch(
+    sources: list[str] = typer.Argument(None, help="URLs or file paths to add"),
+    channel: str = typer.Option(..., "--channel", "-c", help="Channel name (required)"),
+    create: bool = typer.Option(False, "--create", help="Create channel if it doesn't exist"),
+    from_file: Optional[Path] = typer.Option(None, "--from-file", "-f", help="Text file with one source per line"),
+    note: Optional[str] = typer.Option(None, "--note", "-n", help="Note applied to every stream"),
+):
+    """Add multiple streams to a channel in one go.
+
+    Specify sources as arguments, or pass a text file with one source per line via --from-file.
+    The channel must exist unless --create is passed.
+
+    Examples:
+      pinboard add-batch --channel "Governance Studies" file1.pdf file2.pdf https://...
+      pinboard add-batch --channel "New Topic" --create --from-file sources.txt
+    """
+    _ensure_init()
+    cfg = Config.load()
+    from .embeddings import build_service
+    from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, MofNCompleteColumn
+
+    embedder = build_service(cfg)
+
+    # Resolve or create channel — does not switch the active channel
+    with get_conn(DB_PATH) as db:
+        try:
+            channel_id, channel_name = _active_channel(db, channel)
+        except (typer.Exit, ValueError):
+            if not create:
+                print_error(f"Channel '{channel}' not found. Use --create to create it.")
+                raise typer.Exit(1)
+            from .channels import create_channel
+            channel_id = create_channel(db, channel)
+            channel_name = channel
+            print_success(f"Created channel '{channel_name}'")
+
+    # Collect sources
+    all_sources: list[str] = list(sources or [])
+    if from_file:
+        if not from_file.exists():
+            print_error(f"File not found: {from_file}")
+            raise typer.Exit(1)
+        lines = [l.strip() for l in from_file.read_text().splitlines() if l.strip() and not l.startswith("#")]
+        all_sources.extend(lines)
+
+    if not all_sources:
+        print_error("No sources provided. Pass paths/URLs as arguments or use --from-file.")
+        raise typer.Exit(1)
+
+    console.print(f"\n[bold cyan]Adding {len(all_sources)} stream(s) to [{channel_name}][/bold cyan]\n")
+
+    added, failed, total_connections = [], [], 0
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        console=console,
+        transient=True,
+    ) as progress:
+        task = progress.add_task("Ingesting…", total=len(all_sources))
+
+        for source in all_sources:
+            progress.update(task, description=f"{Path(source).name if not source.startswith('http') else source[:60]}")
+            try:
+                with get_conn(DB_PATH) as db:
+                    stream_id = stream_mod.add_stream(
+                        db, source, channel_id=channel_id, note=note, embedder=embedder
+                    )
+                    stream = db.execute("SELECT title, kind FROM streams WHERE id = ?", (stream_id,)).fetchone()
+                    suggested = conn_mod.auto_suggest(db, stream_id, cfg, channel_id)
+                    total_connections += len(suggested)
+                added.append((source, stream_id, stream["title"], stream["kind"]))
+            except Exception as e:
+                failed.append((source, str(e)))
+            finally:
+                progress.advance(task)
+
+    # Summary
+    console.print(f"\n[bold green]✓ {len(added)} added[/bold green]", end="")
+    if failed:
+        console.print(f"  [bold red]✗ {len(failed)} failed[/bold red]", end="")
+    if total_connections:
+        console.print(f"  [dim]{total_connections} connection suggestion(s)[/dim]", end="")
+    console.print()
+
+    for source, stream_id, title, kind in added:
+        console.print(f"  [green]✓[/green] [{kind}] {title!r}  [dim]{stream_id}[/dim]")
+
+    for source, err in failed:
+        console.print(f"  [red]✗[/red] {source}  [dim]{err}[/dim]")
+
+    if total_connections:
+        print_info(f"\nRun: pinboard connections --pending --channel {channel_name!r}")
+
+
+# ---------------------------------------------------------------------------
 # ls
 # ---------------------------------------------------------------------------
 
