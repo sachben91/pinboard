@@ -259,6 +259,16 @@ class _PGConn:
     def close(self):
         self._conn.close()
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if exc_type is None:
+            self._conn.commit()
+        else:
+            self._conn.rollback()
+        return False
+
     # Proxy anything else (e.g. .cursor()) to the underlying connection
     def __getattr__(self, name):
         return getattr(self._conn, name)

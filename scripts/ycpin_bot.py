@@ -69,6 +69,8 @@ def _pick_link(stream_id: str) -> dict | None:
     - Kept links become eligible again after 2^n days (n = keep count, max 32 days)
     - Discarded links are excluded (they'll be deleted anyway)
     """
+    import random
+
     with get_conn(DB_PATH) as db:
         rows = db.execute(
             """
@@ -89,25 +91,38 @@ def _pick_link(stream_id: str) -> dict | None:
               AND l.id NOT IN (
                   SELECT link_id FROM discord_reviews WHERE outcome = 'discarded'
               )
-              AND (
-                  s.link_id IS NULL
-                  OR s.last_sent < datetime('now', '-' ||
-                      MIN(CAST(POWER(2, s.keep_count) AS INTEGER), 32) || ' days')
-              )
-            ORDER BY
-              CASE WHEN s.link_id IS NULL THEN 0 ELSE 1 END,
-              s.last_sent ASC,
-              RANDOM()
-            LIMIT 20
             """,
             (stream_id, stream_id),
         ).fetchall()
 
-        if not rows:
-            return None
+    # Filter by SRS interval in Python (avoids SQLite vs PostgreSQL date function differences)
+    now = datetime.now(timezone.utc)
+    eligible = []
+    for row in rows:
+        last_sent = row["last_sent"]
+        if last_sent is None:
+            eligible.append(row)
+            continue
+        if isinstance(last_sent, str):
+            try:
+                ls = datetime.fromisoformat(last_sent.replace("Z", "+00:00"))
+                if ls.tzinfo is None:
+                    ls = ls.replace(tzinfo=timezone.utc)
+            except Exception:
+                eligible.append(row)
+                continue
+        else:
+            ls = last_sent if last_sent.tzinfo else last_sent.replace(tzinfo=timezone.utc)
+        keep_count = row["keep_count"] or 0
+        if (now - ls) >= timedelta(days=min(2 ** keep_count, 32)):
+            eligible.append(row)
 
-        import random
-        row = random.choice(rows[:min(5, len(rows))])
+    if not eligible:
+        return None
+
+    never = [r for r in eligible if r["last_sent"] is None]
+    pool = (never or eligible)[:5]
+    row = random.choice(pool)
         tags = json.loads(row["tags"]) if row["tags"] else []
         text = row["content_text"] or ""
         summary = (text[:400].strip() + "…") if len(text) > 400 else text.strip()

@@ -30,8 +30,8 @@ except ImportError:
 # Locate the SQLite DB
 # ---------------------------------------------------------------------------
 
-GDRIVE_PATH = Path("/data/pinboard.db")
-FALLBACK_PATH = Path.home() / ".pinboard" / "pinboard.db"
+GDRIVE_PATH = Path.home() / "Library/CloudStorage/GoogleDrive-sachben91@gmail.com/My Drive/pinboard/pinboard.db"
+FALLBACK_PATH = Path("/data/pinboard.db")
 
 
 def find_sqlite_db() -> Path:
@@ -49,6 +49,7 @@ def find_sqlite_db() -> Path:
         f"ERROR: Cannot find SQLite DB.  Tried:\n"
         f"  {GDRIVE_PATH}\n"
         f"  {FALLBACK_PATH}\n"
+        f"  PINBOARD_DB_PATH env var (not set)\n"
         f"Set PINBOARD_DB_PATH to override.",
         file=sys.stderr,
     )
@@ -76,6 +77,9 @@ TABLES = [
 # events and discord_reviews have BIGSERIAL PKs managed by PG — we omit `id`
 # from the INSERT and let the sequence assign one.
 
+# Columns that are INTEGER in SQLite but BOOLEAN in PostgreSQL
+BOOL_COLUMNS: set[str] = {"confirmed"}
+
 
 def build_insert(table: str, columns: str) -> str:
     col_list = [c.strip() for c in columns.split(",")]
@@ -93,17 +97,36 @@ def migrate_table(
     col_list = [c.strip() for c in columns.split(",")]
     embedding_idx = col_list.index("embedding") if has_embedding else -1
 
-    rows = sqlite_conn.execute(f"SELECT {columns} FROM {table}").fetchall()
+    # For tables with FK references, skip orphaned rows
+    if table == "connections":
+        query = (
+            f"SELECT {columns} FROM {table} "
+            f"WHERE link_id IN (SELECT id FROM links) "
+            f"AND pin_id IN (SELECT id FROM pins)"
+        )
+    elif table == "discord_reviews":
+        query = (
+            f"SELECT {columns} FROM {table} "
+            f"WHERE link_id IN (SELECT id FROM links)"
+        )
+    else:
+        query = f"SELECT {columns} FROM {table}"
+    rows = sqlite_conn.execute(query).fetchall()
     if not rows:
         print(f"  {table}: 0 rows (skipping)")
         return
 
     insert_sql = build_insert(table, columns)
+    bool_indices = [i for i, c in enumerate(col_list) if c in BOOL_COLUMNS]
+
     batch = []
     for row in rows:
         row_data = list(row)
         if embedding_idx >= 0 and row_data[embedding_idx] is not None:
             row_data[embedding_idx] = psycopg2.Binary(row_data[embedding_idx])
+        for i in bool_indices:
+            if row_data[i] is not None:
+                row_data[i] = bool(row_data[i])
         batch.append(tuple(row_data))
 
     cur = pg_conn.cursor()
@@ -134,6 +157,23 @@ def main() -> None:
     sqlite_conn.row_factory = sqlite3.Row
 
     pg_conn = psycopg2.connect(database_url)
+
+    print("\nCreating schema...")
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(Path(__file__).parent.parent))
+        from src.pinboard.db import PG_DDL
+        cur = pg_conn.cursor()
+        for stmt in PG_DDL.split(";"):
+            stmt = stmt.strip()
+            if stmt:
+                cur.execute(stmt)
+        pg_conn.commit()
+        print("  Schema ready.")
+    except Exception as e:
+        pg_conn.rollback()
+        print(f"ERROR creating schema: {e}", file=sys.stderr)
+        raise
 
     print("\nMigrating tables...")
     try:
