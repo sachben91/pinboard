@@ -279,7 +279,7 @@ class YCPinBot(discord.Client):
 
         embed = _build_embed(link)
         msg = await channel.send(
-            content="📖 **YCPin — time to review a link from Governance Studies**",
+            content="📖 **YCPin — Time to review a link from Governance Studies**\n✅ to keep this link  ·  ❌ to discard it",
             embed=embed,
         )
         await msg.add_reaction(KEEP_EMOJI)
