@@ -9,16 +9,6 @@ RCLONE_REMOTE="${RCLONE_REMOTE:-gdrive:pinboard/pinboard.db}"
 echo "==> DB path: $DB_PATH"
 mkdir -p "$(dirname "$DB_PATH")"
 
-# Install rclone if not present
-if ! command -v rclone &>/dev/null; then
-    echo "==> Installing rclone..."
-    curl -fsSL https://rclone.org/install.sh | bash 2>/dev/null || \
-        (curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip && \
-         unzip -q rclone-current-linux-amd64.zip && \
-         mv rclone-*-linux-amd64/rclone /usr/local/bin/ && \
-         rm -rf rclone-*)
-fi
-
 # Write rclone config from env var
 if [ -n "$RCLONE_CONFIG_CONTENT" ]; then
     mkdir -p ~/.config/rclone
