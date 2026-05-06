@@ -2,7 +2,7 @@
 
 import pytest
 
-from pinboard.db import init_db, get_conn, DEFAULT_CHANNEL_ID
+from pinboard.db import init_db, get_conn, DEFAULT_STREAM_ID
 from pinboard.config import Config
 
 
@@ -25,37 +25,36 @@ def cfg():
 
 
 @pytest.fixture
-def channel_id():
-    return DEFAULT_CHANNEL_ID
+def stream_id():
+    return DEFAULT_STREAM_ID
 
 
 @pytest.fixture
 def prebuilt_db(tmp_path):
-    """DB with known streams and open events for score testing."""
+    """DB with known links and open events for score testing."""
     from datetime import datetime, timezone, timedelta
-    from pinboard.streams import add_stream
-    from pinboard.pins import pin_stream
+    from pinboard.links import add_link
 
     path = tmp_path / "pre.db"
     init_db(path)
 
     with get_conn(path) as conn:
-        cid = DEFAULT_CHANNEL_ID
-        s1 = add_stream(conn, "https://example.com/a", channel_id=cid, title="Article A")
-        s2 = add_stream(conn, "https://example.com/b", channel_id=cid, title="Article B")
-        s3 = add_stream(conn, "https://example.com/c", channel_id=cid, title="Article C")
+        sid = DEFAULT_STREAM_ID
+        l1 = add_link(conn, "https://example.com/a", stream_id=sid, title="Article A")
+        l2 = add_link(conn, "https://example.com/b", stream_id=sid, title="Article B")
+        l3 = add_link(conn, "https://example.com/c", stream_id=sid, title="Article C")
 
-        def insert_open(sid, days_ago):
+        def insert_open(lid, days_ago):
             ts = (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat()
             conn.execute(
                 "INSERT INTO events (event_type, stream_id, occurred_at) VALUES ('open', ?, ?)",
-                (sid, ts),
+                (lid, ts),
             )
 
-        insert_open(s1, 0)
-        insert_open(s1, 1)
-        insert_open(s1, 2)
-        insert_open(s2, 14)
-        insert_open(s3, 30)
+        insert_open(l1, 0)
+        insert_open(l1, 1)
+        insert_open(l1, 2)
+        insert_open(l2, 14)
+        insert_open(l3, 30)
 
-        return path, s1, s2, s3
+        return path, l1, l2, l3

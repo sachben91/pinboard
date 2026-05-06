@@ -18,74 +18,73 @@ def _age_days(occurred_at: str) -> float:
         return 0.0
 
 
-def stream_score(conn: sqlite3.Connection, stream_id: str, half_life_days: float = 14.0) -> float:
+def link_score(conn: sqlite3.Connection, link_id: str, half_life_days: float = 14.0) -> float:
     rows = conn.execute(
         "SELECT occurred_at FROM events WHERE event_type = 'open' AND stream_id = ?",
-        (stream_id,),
+        (link_id,),
     ).fetchall()
     return sum(math.exp(-_age_days(r["occurred_at"]) / half_life_days) for r in rows)
 
 
-def pin_relevance_score(
-    conn: sqlite3.Connection, stream_id: str, channel_id: str
-) -> float:
-    """Cosine similarity between a stream and the average of active pin embeddings.
-    Returns 0.0 if embeddings are missing."""
+def pin_relevance_score(conn: sqlite3.Connection, link_id: str, stream_id: str) -> float:
+    """Cosine similarity between a link and the average of all embeddings across active pin clusters."""
     from .embeddings import deserialize, cosine_similarity
     import numpy as np
 
-    stream = conn.execute(
-        "SELECT embedding FROM streams WHERE id = ?", (stream_id,)
-    ).fetchone()
-    if not stream or not stream["embedding"]:
+    link = conn.execute("SELECT embedding FROM links WHERE id = ?", (link_id,)).fetchone()
+    if not link or not link["embedding"]:
         return 0.0
 
-    stream_vec = deserialize(stream["embedding"])
+    link_vec = deserialize(link["embedding"])
 
-    pin_embeddings = conn.execute(
+    # Collect embeddings from all links in all active pin clusters
+    pin_link_embeddings = conn.execute(
         """
-        SELECT s.embedding FROM pins p
-        JOIN streams s ON s.id = p.stream_id
-        WHERE p.channel_id = ? AND p.unpinned_at IS NULL AND s.embedding IS NOT NULL
+        SELECT l.embedding FROM pin_links pl
+        JOIN pins p ON p.id = pl.pin_id
+        JOIN links l ON l.id = pl.link_id
+        WHERE p.stream_id = ? AND p.closed_at IS NULL AND l.embedding IS NOT NULL
         """,
-        (channel_id,),
+        (stream_id,),
     ).fetchall()
 
-    if not pin_embeddings:
+    if not pin_link_embeddings:
         return 0.0
 
-    vecs = [deserialize(r["embedding"]) for r in pin_embeddings]
+    vecs = [deserialize(r["embedding"]) for r in pin_link_embeddings]
     avg_pin_vec = np.mean(vecs, axis=0)
-    return round(cosine_similarity(stream_vec, avg_pin_vec), 3)
+    return round(cosine_similarity(link_vec, avg_pin_vec), 3)
 
 
 def lab_scores(
-    conn: sqlite3.Connection, channel_id: str, half_life_days: float = 14.0, limit: int = 20
+    conn: sqlite3.Connection, stream_id: str, half_life_days: float = 14.0, limit: int = 20
 ) -> list[dict]:
-    """Return unpinned streams in the channel ranked by engagement score."""
+    """Return unpinned links in the stream ranked by engagement score."""
     rows = conn.execute(
         """
-        SELECT s.id, s.title, s.kind, s.source, s.created_at
-        FROM streams s
-        WHERE s.channel_id = ?
-          AND s.id NOT IN (
-              SELECT stream_id FROM pins WHERE channel_id = ? AND unpinned_at IS NULL
+        SELECT l.id, l.title, l.kind, l.source, l.created_at
+        FROM links l
+        WHERE l.stream_id = ?
+          AND l.id NOT IN (
+              SELECT pl.link_id FROM pin_links pl
+              JOIN pins p ON p.id = pl.pin_id
+              WHERE p.stream_id = ? AND p.closed_at IS NULL
           )
         """,
-        (channel_id, channel_id),
+        (stream_id, stream_id),
     ).fetchall()
 
     results = []
     for row in rows:
-        sid = row["id"]
+        lid = row["id"]
         opens = conn.execute(
             "SELECT occurred_at FROM events WHERE event_type = 'open' AND stream_id = ?",
-            (sid,),
+            (lid,),
         ).fetchall()
         score = sum(math.exp(-_age_days(r["occurred_at"]) / half_life_days) for r in opens)
         last_opened = max((r["occurred_at"] for r in opens), default=None)
         results.append({
-            "id": sid,
+            "id": lid,
             "title": row["title"],
             "kind": row["kind"],
             "source": row["source"],
@@ -93,7 +92,7 @@ def lab_scores(
             "open_count": len(opens),
             "last_opened": last_opened or "",
             "created_at": row["created_at"],
-            "pin_score": pin_relevance_score(conn, sid, channel_id),
+            "pin_score": pin_relevance_score(conn, lid, stream_id),
         })
 
     results.sort(key=lambda r: r["score"], reverse=True)

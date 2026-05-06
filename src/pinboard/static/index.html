@@ -1,0 +1,659 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Pinboard</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { font-family: 'Inter', system-ui, sans-serif; }
+    .pin-slot { border-left: 3px solid; }
+    .pin-slot-1 { border-color: #6366f1; }
+    .pin-slot-2 { border-color: #f59e0b; }
+    .pin-slot-3 { border-color: #10b981; }
+    .dot-1 { background: #6366f1; }
+    .dot-2 { background: #f59e0b; }
+    .dot-3 { background: #10b981; }
+    .link-row:hover .pin-btn { opacity: 1; }
+    .pin-btn { opacity: 0; transition: opacity 0.15s; }
+    .line-clamp-2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .tag-pill { display: inline-flex; align-items: center; gap: 3px; background: #eef2ff; color: #4f46e5; border-radius: 9999px; padding: 1px 8px; font-size: 11px; cursor: pointer; }
+    .tag-pill:hover { background: #e0e7ff; }
+    .tag-input-wrap { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+    .fade-in { animation: fadeIn 0.2s ease; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+    .spinner { border: 2px solid #e5e7eb; border-top-color: #6366f1; border-radius: 50%; width: 18px; height: 18px; animation: spin 0.6s linear infinite; display: inline-block; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body class="bg-gray-50 text-gray-800 min-h-screen">
+
+<!-- Header -->
+<header class="bg-white border-b border-gray-200 px-4 py-3 flex items-center gap-4 sticky top-0 z-20">
+  <h1 class="text-lg font-bold text-indigo-600 tracking-tight">Pinboard</h1>
+  <select id="streamSelect" class="text-sm border border-gray-200 rounded px-2 py-1 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-400"></select>
+  <div class="flex-1"></div>
+  <input id="searchInput" type="search" placeholder="Search links…"
+    class="text-sm border border-gray-200 rounded-full px-3 py-1 w-56 focus:outline-none focus:ring-2 focus:ring-indigo-400 bg-white" />
+  <button id="addLinkBtn"
+    class="shrink-0 bg-indigo-500 hover:bg-indigo-600 text-white text-sm font-medium rounded-full px-4 py-1 transition">
+    + Add link
+  </button>
+</header>
+
+<!-- Add link modal -->
+<div id="addLinkModal" class="hidden fixed inset-0 z-50 flex items-start justify-center pt-24 px-4">
+  <div class="absolute inset-0 bg-black/30 backdrop-blur-sm" id="addLinkBackdrop"></div>
+  <div class="relative bg-white rounded-xl shadow-2xl w-full max-w-md p-6 fade-in">
+    <h2 class="text-base font-semibold mb-4">Add link to stream</h2>
+    <div class="space-y-3">
+      <div>
+        <label class="text-xs font-medium text-gray-500 block mb-1">URL <span class="text-red-400">*</span></label>
+        <input id="addLinkUrl" type="url" placeholder="https://…"
+          class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-400" />
+      </div>
+      <div>
+        <label class="text-xs font-medium text-gray-500 block mb-1">Title <span class="text-gray-300">(auto-detected if blank)</span></label>
+        <input id="addLinkTitle" type="text" placeholder="Optional"
+          class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-400" />
+      </div>
+      <div>
+        <label class="text-xs font-medium text-gray-500 block mb-1">Note <span class="text-gray-300">(optional)</span></label>
+        <input id="addLinkNote" type="text" placeholder="Why are you saving this?"
+          class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-400" />
+      </div>
+    </div>
+    <div id="addLinkError" class="hidden mt-3 text-xs text-red-500"></div>
+    <div class="flex gap-2 mt-5">
+      <button id="addLinkSubmit"
+        class="flex-1 bg-indigo-500 hover:bg-indigo-600 text-white text-sm font-medium rounded-lg py-2 transition flex items-center justify-center gap-2">
+        Add link
+      </button>
+      <button id="addLinkCancel"
+        class="flex-1 bg-gray-100 hover:bg-gray-200 text-gray-600 text-sm font-medium rounded-lg py-2 transition">
+        Cancel
+      </button>
+    </div>
+  </div>
+</div>
+
+<div class="flex h-[calc(100vh-53px)]">
+
+  <!-- Sidebar: pins -->
+  <aside class="w-72 shrink-0 bg-white border-r border-gray-200 flex flex-col overflow-y-auto">
+    <div class="px-4 py-3 flex items-center justify-between border-b border-gray-100">
+      <span class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Pin Clusters</span>
+      <button id="newClusterBtn" title="New cluster"
+        class="text-indigo-500 hover:text-indigo-700 text-xl leading-none font-light">+</button>
+    </div>
+
+    <!-- New cluster form (hidden initially) -->
+    <div id="newClusterForm" class="hidden px-4 py-3 border-b border-gray-100 bg-indigo-50 fade-in">
+      <input id="newClusterName" type="text" placeholder="Cluster name"
+        class="w-full text-sm border border-gray-200 rounded px-2 py-1 mb-2 focus:outline-none focus:ring-2 focus:ring-indigo-400" />
+      <textarea id="newClusterNote" placeholder="Why this cluster? (optional)"
+        rows="2"
+        class="w-full text-sm border border-gray-200 rounded px-2 py-1 mb-2 resize-none focus:outline-none focus:ring-2 focus:ring-indigo-400"></textarea>
+      <div class="flex gap-2">
+        <button id="submitClusterBtn"
+          class="flex-1 bg-indigo-500 hover:bg-indigo-600 text-white text-xs font-medium rounded py-1 transition">Create</button>
+        <button id="cancelClusterBtn"
+          class="flex-1 bg-gray-100 hover:bg-gray-200 text-gray-600 text-xs font-medium rounded py-1 transition">Cancel</button>
+      </div>
+    </div>
+
+    <div id="pinsList" class="flex-1 px-3 py-2 space-y-3"></div>
+  </aside>
+
+  <!-- Main: links list -->
+  <main class="flex-1 flex flex-col overflow-hidden">
+    <div id="linksList" class="flex-1 overflow-y-auto divide-y divide-gray-100"></div>
+    <footer class="bg-white border-t border-gray-100 px-4 py-2 flex items-center gap-4 text-sm text-gray-500">
+      <button id="prevBtn" class="hover:text-indigo-600 disabled:opacity-30" disabled>← Prev</button>
+      <span id="pageInfo">Page 1</span>
+      <button id="nextBtn" class="hover:text-indigo-600 disabled:opacity-30" disabled>Next →</button>
+      <span class="flex-1"></span>
+      <span id="totalInfo"></span>
+    </footer>
+  </main>
+
+</div>
+
+<!-- Cluster picker (from link row → pick which cluster) -->
+<div id="clusterPicker" class="hidden fixed z-50 bg-white border border-gray-200 rounded-lg shadow-lg py-1 min-w-40 text-sm fade-in"></div>
+
+<!-- Link picker (from "+ add link" in sidebar → pick which link) -->
+<div id="linkPicker" class="hidden fixed z-50 bg-white border border-gray-200 rounded-lg shadow-xl text-sm fade-in" style="width:320px">
+  <div class="px-3 pt-3 pb-2 border-b border-gray-100">
+    <input id="linkPickerSearch" type="search" placeholder="Search links…"
+      class="w-full text-xs border border-gray-200 rounded px-2 py-1 focus:outline-none focus:ring-2 focus:ring-indigo-400" />
+  </div>
+  <div id="linkPickerList" class="overflow-y-auto max-h-60 divide-y divide-gray-50"></div>
+  <div class="px-3 py-1.5 text-xs text-gray-300 border-t border-gray-100" id="linkPickerFooter"></div>
+</div>
+
+<script>
+// ── State ──────────────────────────────────────────────────────────────────
+let state = {
+  streams: [],
+  activeStream: null,
+  pins: [],
+  links: { items: [], total: 0, page: 1, limit: 20 },
+  query: '',
+};
+
+// ── API helpers ────────────────────────────────────────────────────────────
+async function api(method, path, body) {
+  const opts = { method, headers: { 'Content-Type': 'application/json' } };
+  if (body) opts.body = JSON.stringify(body);
+  const res = await fetch('/api' + path, opts);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail || res.statusText);
+  }
+  return res.json();
+}
+const GET = p => api('GET', p);
+const POST = (p, b) => api('POST', p, b);
+const DELETE = p => api('DELETE', p);
+
+// ── Boot ───────────────────────────────────────────────────────────────────
+async function boot() {
+  state.streams = await GET('/streams');
+  renderStreamSelect();
+  if (state.streams.length) {
+    const active = state.streams.find(s => s.active) || state.streams[0];
+    await switchStream(active.id);
+  }
+}
+
+// ── Stream select ──────────────────────────────────────────────────────────
+function renderStreamSelect() {
+  const sel = document.getElementById('streamSelect');
+  sel.innerHTML = state.streams.map(s =>
+    `<option value="${s.id}">${s.name}${s.active ? ' ★' : ''}</option>`
+  ).join('');
+  if (state.activeStream) sel.value = state.activeStream;
+}
+
+document.getElementById('streamSelect').addEventListener('change', e => {
+  switchStream(e.target.value);
+});
+
+async function switchStream(sid) {
+  state.activeStream = sid;
+  state.links.page = 1;
+  state.query = '';
+  state._tagFilter = null;
+  document.getElementById('searchInput').value = '';
+  document.getElementById('tagFilterBanner')?.remove();
+  await Promise.all([loadPins(), loadLinks()]);
+}
+
+// ── Pins ───────────────────────────────────────────────────────────────────
+async function loadPins() {
+  state.pins = await GET(`/streams/${state.activeStream}/pins`);
+  renderPins();
+}
+
+function slotClass(n) { return `pin-slot pin-slot-${n}`; }
+function dotClass(n) { return `dot-${n}`; }
+
+function renderPins() {
+  const el = document.getElementById('pinsList');
+  if (!state.pins.length) {
+    el.innerHTML = `<p class="text-xs text-gray-400 text-center mt-6">No active pin clusters.<br>Click + to create one.</p>`;
+    return;
+  }
+  el.innerHTML = state.pins.map(pin => `
+    <div class="rounded-lg p-3 ${slotClass(pin.slot_order)} bg-gray-50" data-pin-id="${pin.id}">
+      <div class="flex items-start justify-between gap-1 mb-1">
+        <div class="flex items-center gap-1.5 min-w-0">
+          <span class="w-2 h-2 rounded-full shrink-0 ${dotClass(pin.slot_order)}"></span>
+          <span class="text-sm font-semibold truncate">${esc(pin.name)}</span>
+        </div>
+        <button onclick="closePin('${pin.id}')" title="Close cluster"
+          class="text-gray-300 hover:text-red-400 text-lg leading-none shrink-0">×</button>
+      </div>
+      ${pin.note ? `<p class="text-xs text-gray-400 mb-2 leading-snug">${esc(pin.note)}</p>` : ''}
+      <ul class="space-y-1">
+        ${pin.links.map(l => `
+          <li class="flex items-center gap-1 group">
+            <span class="w-1.5 h-1.5 rounded-full bg-gray-300 shrink-0"></span>
+            <a href="${esc(l.source || '')}" target="_blank" rel="noopener"
+              class="text-xs text-gray-600 hover:text-indigo-600 truncate flex-1">${esc(l.title)}</a>
+            <button onclick="removeLinkFromPin('${pin.id}','${l.id}')"
+              class="text-gray-200 hover:text-red-400 opacity-0 group-hover:opacity-100 text-sm leading-none shrink-0 transition">×</button>
+          </li>
+        `).join('')}
+      </ul>
+      ${pin.links.length < 3 ? `
+        <button onclick="openPinDropdownForPin(event,'${pin.id}')"
+          class="mt-2 w-full text-xs text-indigo-400 hover:text-indigo-600 border border-dashed border-indigo-200 hover:border-indigo-400 rounded py-0.5 transition">
+          + add link
+        </button>` : ''}
+    </div>
+  `).join('');
+}
+
+async function closePin(pinId) {
+  if (!confirm('Close this pin cluster?')) return;
+  await DELETE(`/streams/${state.activeStream}/pins/${pinId}`);
+  await loadPins();
+  await loadLinks(); // refresh pinned state
+}
+
+async function removeLinkFromPin(pinId, linkId) {
+  const res = await fetch(`/api/pins/${pinId}/links/${linkId}`, { method: 'DELETE' });
+  if (!res.ok) { const e = await res.json(); alert(e.detail); return; }
+  await Promise.all([loadPins(), loadLinks()]);
+}
+
+// ── New cluster form ───────────────────────────────────────────────────────
+document.getElementById('newClusterBtn').addEventListener('click', () => {
+  document.getElementById('newClusterForm').classList.toggle('hidden');
+  document.getElementById('newClusterName').focus();
+});
+document.getElementById('cancelClusterBtn').addEventListener('click', () => {
+  document.getElementById('newClusterForm').classList.add('hidden');
+});
+document.getElementById('submitClusterBtn').addEventListener('click', createCluster);
+document.getElementById('newClusterName').addEventListener('keydown', e => {
+  if (e.key === 'Enter') createCluster();
+});
+
+async function createCluster() {
+  const name = document.getElementById('newClusterName').value.trim();
+  const note = document.getElementById('newClusterNote').value.trim();
+  if (!name) return;
+  try {
+    await POST(`/streams/${state.activeStream}/pins`, { name, note: note || null });
+    document.getElementById('newClusterForm').classList.add('hidden');
+    document.getElementById('newClusterName').value = '';
+    document.getElementById('newClusterNote').value = '';
+    await loadPins();
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
+// ── Links list ─────────────────────────────────────────────────────────────
+async function loadLinks() {
+  const { page, limit, query } = state.links;
+  const q = query ? `&q=${encodeURIComponent(query)}` : '';
+  const data = await GET(`/streams/${state.activeStream}/links?page=${page}&limit=${limit}${q}`);
+  state.links = { ...state.links, ...data };
+  renderLinks();
+}
+
+function renderLinks() {
+  const { items, total, page, limit } = state.links;
+  const el = document.getElementById('linksList');
+
+  if (!items.length) {
+    el.innerHTML = `<div class="flex items-center justify-center h-32 text-gray-400 text-sm">No links found.</div>`;
+  } else {
+    el.innerHTML = items.map(link => {
+      const hasSummary = !!link.summary;
+      const dateStr = link.posted_at ? formatDate(link.posted_at) : (link.created_at ? formatDate(link.created_at) : '');
+      const tags = link.tags || [];
+      const tagPills = tags.map(t =>
+        `<span class="tag-pill" onclick="filterByTag('${esc(t)}')">${esc(t)}<span onclick="event.stopPropagation();removeTag('${link.id}','${esc(t)}')" class="ml-0.5 text-indigo-300 hover:text-red-400">×</span></span>`
+      ).join('');
+
+      return `
+        <div class="link-row px-4 py-4 hover:bg-gray-50 transition border-b border-gray-100" data-link-id="${link.id}">
+          <div class="flex items-start gap-3">
+            <div class="flex-1 min-w-0">
+
+              <!-- Title -->
+              <a href="${esc(link.source || '#')}" target="_blank" rel="noopener"
+                class="text-sm font-semibold text-gray-900 hover:text-indigo-600 leading-snug block">
+                ${esc(link.title)}
+              </a>
+
+              <!-- Summary -->
+              ${hasSummary ? `<p class="text-xs text-gray-500 mt-1 line-clamp-2 leading-relaxed">${esc(link.summary)}</p>` : ''}
+
+              <!-- Meta row -->
+              <div class="flex items-center flex-wrap gap-x-3 gap-y-1 mt-2">
+                ${dateStr ? `<span class="text-xs text-gray-400 shrink-0">${dateStr}</span>` : ''}
+                ${link.pinned ? `<span class="text-xs text-indigo-400 font-medium shrink-0">★ pinned</span>` : ''}
+                <div class="flex items-center flex-wrap gap-1">
+                  ${tagPills}
+                  <button onclick="openTagInput(event,'${link.id}')"
+                    class="text-xs text-gray-300 hover:text-indigo-400 transition" title="Add tag">+ tag</button>
+                </div>
+              </div>
+
+            </div>
+            <button class="pin-btn shrink-0 text-gray-300 hover:text-indigo-500 text-lg leading-none mt-0.5"
+              onclick="openPinDropdownForLink(event,'${link.id}')" title="Pin to cluster">★</button>
+          </div>
+        </div>
+      `;
+    }).join('');
+  }
+
+  const pages = Math.ceil(total / limit);
+  document.getElementById('pageInfo').textContent = `Page ${page} of ${Math.max(1, pages)}`;
+  document.getElementById('totalInfo').textContent = `${total} link${total !== 1 ? 's' : ''}`;
+  document.getElementById('prevBtn').disabled = page <= 1;
+  document.getElementById('nextBtn').disabled = page >= pages;
+}
+
+document.getElementById('prevBtn').addEventListener('click', () => {
+  if (state.links.page > 1) { state.links.page--; loadLinks(); }
+});
+document.getElementById('nextBtn').addEventListener('click', () => {
+  const pages = Math.ceil(state.links.total / state.links.limit);
+  if (state.links.page < pages) { state.links.page++; loadLinks(); }
+});
+
+// ── Search ────────────────────────────────────────────────────────────────
+let searchTimer;
+document.getElementById('searchInput').addEventListener('input', e => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => {
+    state.links.query = e.target.value.trim();
+    state.links.page = 1;
+    loadLinks();
+  }, 300);
+});
+
+// ── Cluster picker (★ on link row → pick which cluster to add it to) ────────
+function openPinDropdownForLink(event, linkId) {
+  event.stopPropagation();
+  closeAllPopups();
+  const dd = document.getElementById('clusterPicker');
+  const available = state.pins.filter(p => p.links.length < 3);
+  if (!available.length) {
+    dd.innerHTML = `<div class="px-3 py-2 text-xs text-gray-400">All clusters full (3/3).</div>`;
+  } else {
+    dd.innerHTML = available.map(p => `
+      <button class="w-full text-left px-3 py-2 hover:bg-indigo-50 text-xs flex items-center gap-2"
+        onclick="pinLinkToCluster('${linkId}','${p.id}')">
+        <span class="w-2 h-2 rounded-full ${dotClass(p.slot_order)} shrink-0"></span>
+        <span class="truncate">${esc(p.name)}</span>
+        <span class="ml-auto text-gray-300">${p.links.length}/3</span>
+      </button>
+    `).join('');
+  }
+  positionPopup(dd, event.currentTarget);
+}
+
+async function pinLinkToCluster(linkId, pinId) {
+  closeAllPopups();
+  try {
+    const res = await fetch(`/api/pins/${pinId}/links`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ link_id: linkId }),
+    });
+    if (!res.ok) { const e = await res.json(); throw new Error(e.detail); }
+    await Promise.all([loadPins(), loadLinks()]);
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
+// ── Link picker (+ add link in cluster → pick which link to add) ─────────
+let _linkPickerPinId = null;
+let _linkPickerSearchTimer = null;
+let _linkPickerAllLinks = [];
+
+async function openPinDropdownForPin(event, pinId) {
+  event.stopPropagation();
+  closeAllPopups();
+  _linkPickerPinId = pinId;
+  const anchor = event.currentTarget; // capture before any await
+
+  const picker = document.getElementById('linkPicker');
+  const searchEl = document.getElementById('linkPickerSearch');
+  searchEl.value = '';
+  document.getElementById('linkPickerList').innerHTML =
+    `<div class="px-3 py-3 text-xs text-gray-400">Loading…</div>`;
+  positionPopup(picker, anchor, true); // show immediately
+  searchEl.focus();
+
+  await fetchLinkPickerLinks('');
+}
+
+async function fetchLinkPickerLinks(q) {
+  const footer = document.getElementById('linkPickerFooter');
+  const list = document.getElementById('linkPickerList');
+
+  const qParam = q ? `&q=${encodeURIComponent(q)}` : '';
+  const data = await GET(`/streams/${state.activeStream}/links?page=1&limit=50${qParam}`);
+
+  // Filter out links already in this cluster
+  const pin = state.pins.find(p => p.id === _linkPickerPinId);
+  const alreadyIn = new Set((pin?.links || []).map(l => l.id));
+  const unpinned = data.items.filter(l => !l.pinned && !alreadyIn.has(l.id));
+
+  _linkPickerAllLinks = unpinned;
+  renderLinkPickerList(unpinned);
+  footer.textContent = unpinned.length ? `${unpinned.length} available` : '';
+}
+
+function renderLinkPickerList(links) {
+  const list = document.getElementById('linkPickerList');
+  if (!links.length) {
+    list.innerHTML = `<div class="px-3 py-3 text-xs text-gray-400">No unpinned links found.</div>`;
+    return;
+  }
+  list.innerHTML = links.map(l => {
+    const host = l.source ? (() => { try { return new URL(l.source).hostname.replace(/^www\./, ''); } catch { return ''; } })() : '';
+    return `
+      <button class="w-full text-left px-3 py-2 hover:bg-indigo-50 transition"
+        onclick="pickLinkForPin('${l.id}')">
+        <div class="text-xs font-medium text-gray-700 truncate">${esc(l.title)}</div>
+        <div class="text-xs text-gray-400 truncate">${esc(host)}</div>
+      </button>
+    `;
+  }).join('');
+}
+
+document.getElementById('linkPickerSearch').addEventListener('input', e => {
+  clearTimeout(_linkPickerSearchTimer);
+  _linkPickerSearchTimer = setTimeout(() => fetchLinkPickerLinks(e.target.value.trim()), 250);
+});
+
+async function pickLinkForPin(linkId) {
+  closeAllPopups();
+  try {
+    const res = await fetch(`/api/pins/${_linkPickerPinId}/links`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ link_id: linkId }),
+    });
+    if (!res.ok) { const e = await res.json(); throw new Error(e.detail); }
+    await Promise.all([loadPins(), loadLinks()]);
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
+// ── Popup helpers ─────────────────────────────────────────────────────────
+function positionPopup(el, anchor, preferLeft = false) {
+  const rect = anchor.getBoundingClientRect();
+  el.classList.remove('hidden');
+  const w = el.offsetWidth || 200;
+  let left = preferLeft ? rect.left : Math.min(rect.left, window.innerWidth - w - 8);
+  left = Math.max(8, left);
+  el.style.top = `${rect.bottom + 4 + window.scrollY}px`;
+  el.style.left = `${left}px`;
+}
+
+function closeAllPopups() {
+  document.getElementById('clusterPicker').classList.add('hidden');
+  document.getElementById('linkPicker').classList.add('hidden');
+}
+
+document.addEventListener('click', e => {
+  if (!e.target.closest('#clusterPicker') && !e.target.closest('#linkPicker')) {
+    closeAllPopups();
+  }
+});
+
+// ── Utilities ──────────────────────────────────────────────────────────────
+function esc(s) {
+  if (!s) return '';
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function formatDate(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  const now = new Date();
+  const diff = (now - d) / 1000;
+  if (diff < 60) return 'just now';
+  if (diff < 3600) return `${Math.floor(diff/60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff/3600)}h ago`;
+  if (diff < 86400*7) return `${Math.floor(diff/86400)}d ago`;
+  return d.toLocaleDateString(undefined, { month:'short', day:'numeric', year: d.getFullYear() !== now.getFullYear() ? 'numeric' : undefined });
+}
+
+// ── Tags ──────────────────────────────────────────────────────────────────
+function filterByTag(tag) {
+  document.getElementById('searchInput').value = '';
+  state.links.query = '';
+  state._tagFilter = tag;
+  state.links.page = 1;
+  loadLinksWithTag(tag);
+}
+
+async function loadLinksWithTag(tag) {
+  const { page, limit } = state.links;
+  const data = await GET(`/streams/${state.activeStream}/links?page=${page}&limit=${limit}&tag=${encodeURIComponent(tag)}`);
+  state.links = { ...state.links, ...data };
+  renderLinks();
+  // Show active tag filter banner
+  let banner = document.getElementById('tagFilterBanner');
+  if (!banner) {
+    banner = document.createElement('div');
+    banner.id = 'tagFilterBanner';
+    banner.className = 'px-4 py-2 bg-indigo-50 text-xs text-indigo-700 flex items-center gap-2 border-b border-indigo-100';
+    document.getElementById('linksList').before(banner);
+  }
+  banner.innerHTML = `Filtering by tag: <span class="font-semibold">${esc(tag)}</span>
+    <button onclick="clearTagFilter()" class="ml-auto text-indigo-400 hover:text-indigo-600">✕ clear</button>`;
+}
+
+function clearTagFilter() {
+  state._tagFilter = null;
+  document.getElementById('tagFilterBanner')?.remove();
+  state.links.page = 1;
+  loadLinks();
+}
+
+function openTagInput(event, linkId) {
+  event.stopPropagation();
+  closeAllPopups();
+  const dd = document.getElementById('clusterPicker');
+  dd.innerHTML = `
+    <div class="px-3 py-2">
+      <input id="tagInputField" type="text" placeholder="tag name, Enter to save"
+        class="w-full text-xs border border-gray-200 rounded px-2 py-1 focus:outline-none focus:ring-2 focus:ring-indigo-400"
+        style="min-width:180px" />
+    </div>`;
+  positionPopup(dd, event.currentTarget);
+  const input = document.getElementById('tagInputField');
+  input.focus();
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); saveTag(linkId, input.value.trim()); }
+    if (e.key === 'Escape') closeAllPopups();
+  });
+}
+
+async function saveTag(linkId, tag) {
+  closeAllPopups();
+  if (!tag) return;
+  const link = state.links.items.find(l => l.id === linkId);
+  const current = link?.tags || [];
+  if (current.includes(tag)) return;
+  const updated = [...current, tag];
+  await fetch(`/api/links/${linkId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tags: updated }),
+  });
+  // Update in-place without full reload
+  if (link) link.tags = updated;
+  renderLinks();
+}
+
+async function removeTag(linkId, tag) {
+  const link = state.links.items.find(l => l.id === linkId);
+  if (!link) return;
+  const updated = link.tags.filter(t => t !== tag);
+  await fetch(`/api/links/${linkId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tags: updated }),
+  });
+  link.tags = updated;
+  renderLinks();
+}
+
+// ── Add link modal ────────────────────────────────────────────────────────
+function openAddLinkModal() {
+  document.getElementById('addLinkUrl').value = '';
+  document.getElementById('addLinkTitle').value = '';
+  document.getElementById('addLinkNote').value = '';
+  document.getElementById('addLinkError').classList.add('hidden');
+  setAddLinkLoading(false);
+  document.getElementById('addLinkModal').classList.remove('hidden');
+  document.getElementById('addLinkUrl').focus();
+}
+
+function closeAddLinkModal() {
+  document.getElementById('addLinkModal').classList.add('hidden');
+}
+
+function setAddLinkLoading(on) {
+  const btn = document.getElementById('addLinkSubmit');
+  btn.disabled = on;
+  btn.innerHTML = on
+    ? `<span class="spinner"></span> Fetching…`
+    : `Add link`;
+}
+
+document.getElementById('addLinkBtn').addEventListener('click', openAddLinkModal);
+document.getElementById('addLinkCancel').addEventListener('click', closeAddLinkModal);
+document.getElementById('addLinkBackdrop').addEventListener('click', closeAddLinkModal);
+document.getElementById('addLinkUrl').addEventListener('keydown', e => {
+  if (e.key === 'Enter') submitAddLink();
+});
+document.getElementById('addLinkSubmit').addEventListener('click', submitAddLink);
+
+async function submitAddLink() {
+  const url = document.getElementById('addLinkUrl').value.trim();
+  const title = document.getElementById('addLinkTitle').value.trim();
+  const note = document.getElementById('addLinkNote').value.trim();
+  const errEl = document.getElementById('addLinkError');
+
+  if (!url) { errEl.textContent = 'URL is required.'; errEl.classList.remove('hidden'); return; }
+  errEl.classList.add('hidden');
+  setAddLinkLoading(true);
+
+  try {
+    await POST(`/streams/${state.activeStream}/links`, {
+      url,
+      title: title || null,
+      note: note || null,
+    });
+    closeAddLinkModal();
+    state.links.page = 1;
+    await loadLinks();
+  } catch (e) {
+    setAddLinkLoading(false);
+    errEl.textContent = e.message;
+    errEl.classList.remove('hidden');
+  }
+}
+
+boot();
+</script>
+</body>
+</html>

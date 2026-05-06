@@ -6,27 +6,29 @@ import json
 import subprocess
 import sys
 import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
 
 import typer
 from rich.console import Console
 
-from .channels import (
-    create_channel, list_channels, resolve_channel_id,
-    get_active_channel_id, set_active_channel_id,
+from .streams_ws import (
+    create_stream, list_streams, resolve_stream_id,
+    get_active_stream_id, set_active_stream_id,
 )
 from .config import Config, DB_PATH, PINBOARD_DIR, ARTIFACTS_DIR
 from .db import init_db, get_conn
 from . import connections as conn_mod
 from . import pins as pin_mod
-from . import streams as stream_mod
+from . import links as link_mod
 from .events import record, now_utc
 from .output import emit, print_error, print_success, print_info
-from .scoring import lab_scores, stream_score, pin_relevance_score
+from .scoring import lab_scores, link_score, pin_relevance_score
 from . import skills as skills_mod
 
-app = typer.Typer(help="Pinboard: local-first personal pinning & streams system.", no_args_is_help=True)
+app = typer.Typer(help="Pinboard: local-first personal pinning & links system.", no_args_is_help=True)
 console = Console()
 
 
@@ -40,22 +42,21 @@ def _ensure_init():
         raise typer.Exit(1)
 
 
-def _active_channel(db, override: str | None = None) -> tuple[str, str]:
-    """Return (channel_id, channel_name) for the active or overridden channel."""
+def _active_stream(db, override: str | None = None) -> tuple[str, str]:
+    """Return (stream_id, stream_name) for the active or overridden stream."""
     if override:
-        cid = resolve_channel_id(db, override)
+        sid = resolve_stream_id(db, override)
     else:
-        cid = get_active_channel_id()
-        row = db.execute("SELECT id, name FROM channels WHERE id = ?", (cid,)).fetchone()
+        sid = get_active_stream_id()
+        row = db.execute("SELECT id, name FROM streams WHERE id = ?", (sid,)).fetchone()
         if not row:
-            # Fall back to default
-            row = db.execute("SELECT id, name FROM channels ORDER BY created_at LIMIT 1").fetchone()
+            row = db.execute("SELECT id, name FROM streams ORDER BY created_at LIMIT 1").fetchone()
             if not row:
-                print_error("No channels found. Run: pinboard init")
+                print_error("No streams found. Run: pinboard init")
                 raise typer.Exit(1)
-            cid = row["id"]
-    row = db.execute("SELECT name FROM channels WHERE id = ?", (cid,)).fetchone()
-    return cid, row["name"]
+            sid = row["id"]
+    row = db.execute("SELECT name FROM streams WHERE id = ?", (sid,)).fetchone()
+    return sid, row["name"]
 
 
 # ---------------------------------------------------------------------------
@@ -69,72 +70,72 @@ def init():
     ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
     init_db(DB_PATH)
     print_success(f"Pinboard initialized at {PINBOARD_DIR}")
-    print_info("Default channel 'default' is active.")
+    print_info("Default stream 'default' is active.")
 
 
 # ---------------------------------------------------------------------------
-# channel commands
+# stream commands
 # ---------------------------------------------------------------------------
 
-channel_app = typer.Typer(help="Manage channels.")
-app.add_typer(channel_app, name="channel")
+stream_app = typer.Typer(help="Manage streams (workspaces).")
+app.add_typer(stream_app, name="stream")
 
 
-@channel_app.callback(invoke_without_command=True)
-def channel_default(ctx: typer.Context):
+@stream_app.callback(invoke_without_command=True)
+def stream_default(ctx: typer.Context):
     if not ctx.invoked_subcommand:
         _ensure_init()
         with get_conn(DB_PATH) as db:
-            rows = list_channels(db)
+            rows = list_streams(db)
         for r in rows:
             marker = "▶" if r["active"] else " "
-            console.print(f"  {marker} [bold]{r['name']}[/bold]  [dim]{r['pin_count']} pins  {r['stream_count']} streams[/dim]")
+            console.print(f"  {marker} [bold]{r['name']}[/bold]  [dim]{r['pin_count']} pins  {r['link_count']} links[/dim]")
 
 
-@channel_app.command("create")
-def channel_create(
-    name: str = typer.Argument(..., help="Channel name"),
-    switch: bool = typer.Option(True, "--switch/--no-switch", help="Switch to new channel after creating"),
+@stream_app.command("create")
+def stream_create(
+    name: str = typer.Argument(..., help="Stream name"),
+    switch: bool = typer.Option(True, "--switch/--no-switch", help="Switch to new stream after creating"),
 ):
-    """Create a new channel."""
+    """Create a new stream."""
     _ensure_init()
     with get_conn(DB_PATH) as db:
         try:
-            cid = create_channel(db, name)
+            sid = create_stream(db, name)
         except ValueError as e:
             print_error(str(e))
             raise typer.Exit(1)
     if switch:
-        set_active_channel_id(cid)
-        print_success(f"Created and switched to channel '{name}'")
+        set_active_stream_id(sid)
+        print_success(f"Created and switched to stream '{name}'")
     else:
-        print_success(f"Created channel '{name}'  id={cid}")
+        print_success(f"Created stream '{name}'  id={sid}")
 
 
-@channel_app.command("switch")
-def channel_switch(name_or_id: str = typer.Argument(..., help="Channel name or id")):
-    """Switch the active channel."""
+@stream_app.command("switch")
+def stream_switch(name_or_id: str = typer.Argument(..., help="Stream name or id")):
+    """Switch the active stream."""
     _ensure_init()
     with get_conn(DB_PATH) as db:
         try:
-            cid = resolve_channel_id(db, name_or_id)
-            row = db.execute("SELECT name FROM channels WHERE id = ?", (cid,)).fetchone()
+            sid = resolve_stream_id(db, name_or_id)
+            row = db.execute("SELECT name FROM streams WHERE id = ?", (sid,)).fetchone()
         except ValueError as e:
             print_error(str(e))
             raise typer.Exit(1)
-    set_active_channel_id(cid)
-    print_success(f"Switched to channel '{row['name']}'")
+    set_active_stream_id(sid)
+    print_success(f"Switched to stream '{row['name']}'")
 
 
-@channel_app.command("ls")
-def channel_ls():
-    """List all channels."""
+@stream_app.command("ls")
+def stream_ls():
+    """List all streams."""
     _ensure_init()
     with get_conn(DB_PATH) as db:
-        rows = list_channels(db)
+        rows = list_streams(db)
     for r in rows:
         marker = "▶" if r["active"] else " "
-        console.print(f"  {marker} [bold]{r['name']}[/bold]  [dim]{r['pin_count']} pins  {r['stream_count']} streams  id={r['id']}[/dim]")
+        console.print(f"  {marker} [bold]{r['name']}[/bold]  [dim]{r['pin_count']} pins  {r['link_count']} links  id={r['id']}[/dim]")
 
 
 # ---------------------------------------------------------------------------
@@ -147,23 +148,23 @@ def add(
     title: Optional[str] = typer.Option(None, "--title", "-t"),
     note: Optional[str] = typer.Option(None, "--note", "-n"),
     cache: bool = typer.Option(False, "--cache"),
-    channel: Optional[str] = typer.Option(None, "--channel", "-c", help="Channel name (default: active)"),
+    stream: Optional[str] = typer.Option(None, "--stream", "-s", help="Stream name (default: active)"),
 ):
-    """Add a stream to the active channel."""
+    """Add a link to the active stream."""
     _ensure_init()
     cfg = Config.load()
     from .embeddings import build_service
     embedder = build_service(cfg)
 
     with get_conn(DB_PATH) as db:
-        channel_id, channel_name = _active_channel(db, channel)
-        stream_id = stream_mod.add_stream(
-            db, source, channel_id=channel_id, title=title, note=note, cache=cache, embedder=embedder
+        stream_id, stream_name = _active_stream(db, stream)
+        lid = link_mod.add_link(
+            db, source, stream_id=stream_id, title=title, note=note, cache=cache, embedder=embedder
         )
-        stream = db.execute("SELECT * FROM streams WHERE id = ?", (stream_id,)).fetchone()
-        suggested = conn_mod.auto_suggest(db, stream_id, cfg, channel_id)
+        lnk = db.execute("SELECT * FROM links WHERE id = ?", (lid,)).fetchone()
+        suggested = conn_mod.auto_suggest(db, lid, cfg, stream_id)
 
-    print_success(f"[{channel_name}] Added stream [{stream['kind']}] {stream['title']!r}  id={stream_id}")
+    print_success(f"[{stream_name}] Added link [{lnk['kind']}] {lnk['title']!r}  id={lid}")
     if suggested:
         print_info(f"  → {len(suggested)} connection suggestion(s). Run: pinboard connections --pending")
 
@@ -175,41 +176,38 @@ def add(
 @app.command("add-batch")
 def add_batch(
     sources: list[str] = typer.Argument(None, help="URLs or file paths to add"),
-    channel: str = typer.Option(..., "--channel", "-c", help="Channel name (required)"),
-    create: bool = typer.Option(False, "--create", help="Create channel if it doesn't exist"),
+    stream: str = typer.Option(..., "--stream", "-s", help="Stream name (required)"),
+    create: bool = typer.Option(False, "--create", help="Create stream if it doesn't exist"),
     from_file: Optional[Path] = typer.Option(None, "--from-file", "-f", help="Text file with one source per line"),
-    note: Optional[str] = typer.Option(None, "--note", "-n", help="Note applied to every stream"),
+    note: Optional[str] = typer.Option(None, "--note", "-n", help="Note applied to every link"),
+    workers: int = typer.Option(8, "--workers", "-w", help="Parallel worker threads (default: 8)"),
 ):
-    """Add multiple streams to a channel in one go.
-
-    Specify sources as arguments, or pass a text file with one source per line via --from-file.
-    The channel must exist unless --create is passed.
+    """Add multiple links to a stream in one go.
 
     Examples:
-      pinboard add-batch --channel "Governance Studies" file1.pdf file2.pdf https://...
-      pinboard add-batch --channel "New Topic" --create --from-file sources.txt
+      pinboard add-batch --stream "Governance Studies" file1.pdf https://...
+      pinboard add-batch --stream "New Topic" --create --from-file sources.txt
     """
+    import threading
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, MofNCompleteColumn
+
     _ensure_init()
     cfg = Config.load()
     from .embeddings import build_service
-    from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, MofNCompleteColumn
-
     embedder = build_service(cfg)
 
-    # Resolve or create channel — does not switch the active channel
     with get_conn(DB_PATH) as db:
         try:
-            channel_id, channel_name = _active_channel(db, channel)
+            stream_id, stream_name = _active_stream(db, stream)
         except (typer.Exit, ValueError):
             if not create:
-                print_error(f"Channel '{channel}' not found. Use --create to create it.")
+                print_error(f"Stream '{stream}' not found. Use --create to create it.")
                 raise typer.Exit(1)
-            from .channels import create_channel
-            channel_id = create_channel(db, channel)
-            channel_name = channel
-            print_success(f"Created channel '{channel_name}'")
+            stream_id = create_stream(db, stream)
+            stream_name = stream
+            print_success(f"Created stream '{stream_name}'")
 
-    # Collect sources
     all_sources: list[str] = list(sources or [])
     if from_file:
         if not from_file.exists():
@@ -222,9 +220,32 @@ def add_batch(
         print_error("No sources provided. Pass paths/URLs as arguments or use --from-file.")
         raise typer.Exit(1)
 
-    console.print(f"\n[bold cyan]Adding {len(all_sources)} stream(s) to [{channel_name}][/bold cyan]\n")
+    console.print(f"\n[bold cyan]Adding {len(all_sources)} link(s) to [{stream_name}][/bold cyan]  [dim]workers={workers}[/dim]\n")
 
-    added, failed, total_connections = [], [], 0
+    added: list[tuple] = []
+    failed: list[tuple] = []
+    total_connections = 0
+    db_lock = threading.Lock()
+    results_lock = threading.Lock()
+
+    def _ingest_one(source: str) -> tuple:
+        try:
+            prepared = link_mod.prepare_link(
+                source, stream_name=stream_name, stream_id=stream_id,
+                note=note, embedder=embedder,
+            )
+            with db_lock:
+                with get_conn(DB_PATH) as db:
+                    lid = link_mod.write_link(db, prepared)
+            with get_conn(DB_PATH) as db:
+                pending_conns = conn_mod.prepare_auto_connections(db, lid, cfg, stream_id)
+            if pending_conns:
+                with db_lock:
+                    with get_conn(DB_PATH) as db:
+                        conn_mod.write_auto_connections(db, pending_conns)
+            return (True, source, lid, prepared["title"], prepared["kind"], len(pending_conns))
+        except Exception as e:
+            return (False, source, str(e), None, None, 0)
 
     with Progress(
         SpinnerColumn(),
@@ -235,24 +256,21 @@ def add_batch(
         transient=True,
     ) as progress:
         task = progress.add_task("Ingesting…", total=len(all_sources))
-
-        for source in all_sources:
-            progress.update(task, description=f"{Path(source).name if not source.startswith('http') else source[:60]}")
-            try:
-                with get_conn(DB_PATH) as db:
-                    stream_id = stream_mod.add_stream(
-                        db, source, channel_id=channel_id, note=note, embedder=embedder
-                    )
-                    stream = db.execute("SELECT title, kind FROM streams WHERE id = ?", (stream_id,)).fetchone()
-                    suggested = conn_mod.auto_suggest(db, stream_id, cfg, channel_id)
-                    total_connections += len(suggested)
-                added.append((source, stream_id, stream["title"], stream["kind"]))
-            except Exception as e:
-                failed.append((source, str(e)))
-            finally:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(_ingest_one, src): src for src in all_sources}
+            for future in as_completed(futures):
+                result = future.result()
+                ok, source, *rest = result
+                with results_lock:
+                    if ok:
+                        lid, title, kind, n_conn = rest
+                        added.append((source, lid, title, kind))
+                        total_connections += n_conn
+                    else:
+                        err = rest[0]
+                        failed.append((source, err))
                 progress.advance(task)
 
-    # Summary
     console.print(f"\n[bold green]✓ {len(added)} added[/bold green]", end="")
     if failed:
         console.print(f"  [bold red]✗ {len(failed)} failed[/bold red]", end="")
@@ -260,14 +278,12 @@ def add_batch(
         console.print(f"  [dim]{total_connections} connection suggestion(s)[/dim]", end="")
     console.print()
 
-    for source, stream_id, title, kind in added:
-        console.print(f"  [green]✓[/green] [{kind}] {title!r}  [dim]{stream_id}[/dim]")
-
+    for source, lid, title, kind in added:
+        console.print(f"  [green]✓[/green] [{kind}] {title!r}  [dim]{lid}[/dim]")
     for source, err in failed:
         console.print(f"  [red]✗[/red] {source}  [dim]{err}[/dim]")
-
     if total_connections:
-        print_info(f"\nRun: pinboard connections --pending --channel {channel_name!r}")
+        print_info(f"\nRun: pinboard connections --pending --stream {stream_name!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -275,118 +291,187 @@ def add_batch(
 # ---------------------------------------------------------------------------
 
 @app.command("ls")
-def list_streams(
+def list_links(
     pins_only: bool = typer.Option(False, "--pins-only"),
-    channel: Optional[str] = typer.Option(None, "--channel", "-c"),
+    stream: Optional[str] = typer.Option(None, "--stream", "-s"),
     link: bool = typer.Option(False, "-l", "--link"),
     as_json: bool = typer.Option(False, "-j", "--json"),
     pretty: bool = typer.Option(False, "-P", "--pretty"),
-    select: Optional[str] = typer.Option(None, "-s", "--select"),
+    select: Optional[str] = typer.Option(None, "--select"),
     n: Optional[int] = typer.Option(None, "-n"),
 ):
-    """List active pins then recent streams in the active channel."""
+    """List pin clusters then recent links in the active stream."""
     _ensure_init()
     with get_conn(DB_PATH) as db:
-        channel_id, channel_name = _active_channel(db, channel)
+        stream_id, stream_name = _active_stream(db, stream)
+        pins = pin_mod.active_pins(db, stream_id)
+        rows = []
 
-        active = db.execute(
-            """
-            SELECT p.slot_order as slot, s.id, s.kind, s.title, s.source,
-                   s.artifact_path, s.created_at, p.note as pin_note, p.id as pin_id
-            FROM pins p JOIN streams s ON s.id = p.stream_id
-            WHERE p.channel_id = ? AND p.unpinned_at IS NULL
-            ORDER BY p.slot_order
-            """,
-            (channel_id,),
-        ).fetchall()
-
-        rows = [dict(r) | {"pinned": "★", "channel": channel_name} for r in active]
+        for p in pins:
+            for pl in p["links"]:
+                rows.append({
+                    "id": pl["id"], "kind": pl["kind"], "title": pl["title"],
+                    "source": pl["source"], "artifact_path": pl["artifact_path"],
+                    "created_at": pl["added_at"], "pinned": "★",
+                    "pin_name": p["name"], "channel": stream_name,
+                })
 
         if not pins_only:
             recent = db.execute(
                 """
-                SELECT s.id, s.kind, s.title, s.source, s.artifact_path, s.created_at
-                FROM streams s
-                WHERE s.channel_id = ?
-                  AND s.id NOT IN (SELECT stream_id FROM pins WHERE channel_id = ? AND unpinned_at IS NULL)
-                ORDER BY s.created_at DESC
-                LIMIT 50
+                SELECT l.id, l.kind, l.title, l.source, l.artifact_path, l.created_at
+                FROM links l
+                WHERE l.stream_id = ?
+                  AND l.id NOT IN (
+                      SELECT pl.link_id FROM pin_links pl
+                      JOIN pins p ON p.id = pl.pin_id
+                      WHERE p.stream_id = ? AND p.closed_at IS NULL
+                  )
+                ORDER BY l.created_at DESC LIMIT 50
                 """,
-                (channel_id, channel_id),
+                (stream_id, stream_id),
             ).fetchall()
             rows += [
-                dict(r) | {
-                    "pinned": "",
-                    "slot": "",
-                    "channel": channel_name,
-                    "pin_score": pin_relevance_score(db, r["id"], channel_id),
-                }
+                dict(r) | {"pinned": "", "pin_name": "", "channel": stream_name,
+                            "pin_score": pin_relevance_score(db, r["id"], stream_id)}
                 for r in recent
             ]
 
     if not link and not as_json and not pins_only:
-        console.print(f"\n[bold cyan]Channel: {channel_name}[/bold cyan]  [dim](3 pin max)[/dim]")
+        console.print(f"\n[bold cyan]Stream: {stream_name}[/bold cyan]  "
+                      f"[dim]({pin_mod.MAX_PINS_PER_STREAM} pin clusters max, {pin_mod.MAX_LINKS_PER_PIN} links per cluster)[/dim]")
 
     emit(rows, link_only=link, as_json=as_json, pretty=pretty, select_fields=select, limit=n)
 
 
 # ---------------------------------------------------------------------------
-# pin / unpin
+# pin commands
 # ---------------------------------------------------------------------------
 
-@app.command()
-def pin(
-    stream_id: str = typer.Argument(...),
-    note: Optional[str] = typer.Option(None, "--note", "-n"),
-    channel: Optional[str] = typer.Option(None, "--channel", "-c"),
+pin_app = typer.Typer(help="Manage pin clusters.")
+app.add_typer(pin_app, name="pin")
+
+
+@pin_app.callback(invoke_without_command=True)
+def pin_default(ctx: typer.Context):
+    if not ctx.invoked_subcommand:
+        _ensure_init()
+        with get_conn(DB_PATH) as db:
+            stream_id, stream_name = _active_stream(db)
+            pins = pin_mod.active_pins(db, stream_id)
+        console.print(f"\n[bold cyan]Pin clusters — {stream_name}[/bold cyan]\n")
+        for p in pins:
+            console.print(f"  [bold magenta]★ {p['name']}[/bold magenta]  [dim]slot {p['slot_order']}  id={p['id']}[/dim]")
+            if p.get("note"):
+                console.print(f"    [italic]{p['note']}[/italic]")
+            for pl in p["links"]:
+                console.print(f"    • {pl['title']}  [dim]{pl['id']}[/dim]")
+        if not pins:
+            print_info("No active pin clusters. Run: pinboard pin create \"Cluster Name\"")
+
+
+@pin_app.command("create")
+def pin_create(
+    name: str = typer.Argument(..., help="Cluster name"),
+    note: Optional[str] = typer.Option(None, "--note", "-n", help="Why this cluster, why now"),
+    stream: Optional[str] = typer.Option(None, "--stream", "-s"),
 ):
-    """Pin a stream in the active channel (max 3 per channel)."""
+    """Create a new pin cluster."""
     _ensure_init()
     if not note:
-        note = typer.prompt("Pin note (why this, why now?)", default="", show_default=False) or None
-
+        note = typer.prompt("Pin note (why this cluster, why now?)", default="", show_default=False) or None
     with get_conn(DB_PATH) as db:
-        channel_id, channel_name = _active_channel(db, channel)
+        stream_id, stream_name = _active_stream(db, stream)
         try:
-            pin_id = pin_mod.pin_stream(db, channel_id, stream_id, note=note)
+            pin_id = pin_mod.create_pin(db, stream_id, name, note=note)
         except ValueError as e:
             print_error(str(e))
             raise typer.Exit(1)
-
-        # Generate pin skill in the same transaction
-        stream_row = db.execute(
-            "SELECT title, content_text FROM streams WHERE id = ?", (stream_id,)
-        ).fetchone()
-
-    print_success(f"[{channel_name}] Pinned stream {stream_id}  pin_id={pin_id}")
-
-    if stream_row and stream_row["content_text"]:
-        print_info("Generating pin skill…")
-        cfg = Config.load()
-        skill = skills_mod.generate_skill(cfg, pin_id, stream_row["title"], stream_row["content_text"])
-        if skill:
-            with get_conn(DB_PATH) as db:
-                skills_mod.save_skill(db, pin_id, skill)
-            print_success(f"Skill generated: {len(skill.get('themes',[]))} themes, {len(skill.get('search_signals',[]))} search signals")
-            for t in skill.get("themes", []):
-                print_info(f"  · {t}")
+    print_success(f"[{stream_name}] Created pin cluster '{name}'  id={pin_id}")
 
 
-@app.command()
-def unpin(
-    id_or_slot: str = typer.Argument(..., help="Pin id, stream id, or slot number (1-3)"),
-    channel: Optional[str] = typer.Option(None, "--channel", "-c"),
+@pin_app.command("add")
+def pin_add(
+    pin_id: str = typer.Argument(..., help="Pin cluster id or slot number"),
+    link_id: str = typer.Argument(..., help="Link id to add to the cluster"),
+    stream: Optional[str] = typer.Option(None, "--stream", "-s"),
 ):
-    """Unpin a stream. Slots are re-numbered automatically."""
+    """Add a link to a pin cluster."""
     _ensure_init()
     with get_conn(DB_PATH) as db:
-        channel_id, channel_name = _active_channel(db, channel)
+        stream_id, stream_name = _active_stream(db, stream)
+        resolved_pin = pin_mod.resolve_pin_id(db, stream_id, pin_id)
+        if not resolved_pin:
+            print_error(f"Pin cluster not found: {pin_id}")
+            raise typer.Exit(1)
         try:
-            pin_id = pin_mod.unpin(db, channel_id, id_or_slot)
+            pl_id = pin_mod.add_link_to_pin(db, resolved_pin, link_id)
         except ValueError as e:
             print_error(str(e))
             raise typer.Exit(1)
-    print_success(f"[{channel_name}] Unpinned  pin_id={pin_id}")
+        pin_row = db.execute("SELECT name FROM pins WHERE id = ?", (resolved_pin,)).fetchone()
+        link_row = db.execute("SELECT title FROM links WHERE id = ?", (link_id,)).fetchone()
+
+    print_success(f"[{stream_name}] Added '{link_row['title']}' to cluster '{pin_row['name']}'")
+
+    # Generate skill from aggregated cluster content
+    cfg = Config.load()
+    with get_conn(DB_PATH) as db:
+        cluster_links = db.execute(
+            """
+            SELECT l.title, l.content_text FROM pin_links pl
+            JOIN links l ON l.id = pl.link_id WHERE pl.pin_id = ?
+            """,
+            (resolved_pin,),
+        ).fetchall()
+    combined_text = "\n\n".join((r["content_text"] or "") for r in cluster_links if r["content_text"])
+    combined_title = " + ".join(r["title"] for r in cluster_links)
+    if combined_text:
+        print_info("Generating pin skill…")
+        skill = skills_mod.generate_skill(cfg, resolved_pin, combined_title, combined_text)
+        if skill:
+            with get_conn(DB_PATH) as db:
+                skills_mod.save_skill(db, resolved_pin, skill)
+            print_success(f"Skill updated: {len(skill.get('themes', []))} themes")
+
+
+@pin_app.command("remove")
+def pin_remove(
+    pin_id: str = typer.Argument(..., help="Pin cluster id or slot number"),
+    link_id: str = typer.Argument(..., help="Link id to remove"),
+    stream: Optional[str] = typer.Option(None, "--stream", "-s"),
+):
+    """Remove a link from a pin cluster."""
+    _ensure_init()
+    with get_conn(DB_PATH) as db:
+        stream_id, stream_name = _active_stream(db, stream)
+        resolved_pin = pin_mod.resolve_pin_id(db, stream_id, pin_id)
+        if not resolved_pin:
+            print_error(f"Pin cluster not found: {pin_id}")
+            raise typer.Exit(1)
+        try:
+            pin_mod.remove_link_from_pin(db, resolved_pin, link_id)
+        except ValueError as e:
+            print_error(str(e))
+            raise typer.Exit(1)
+    print_success(f"[{stream_name}] Removed link from cluster.")
+
+
+@pin_app.command("close")
+def pin_close(
+    id_or_slot: str = typer.Argument(..., help="Pin cluster id or slot number (1-3)"),
+    stream: Optional[str] = typer.Option(None, "--stream", "-s"),
+):
+    """Close a pin cluster."""
+    _ensure_init()
+    with get_conn(DB_PATH) as db:
+        stream_id, stream_name = _active_stream(db, stream)
+        try:
+            pin_id = pin_mod.close_pin(db, stream_id, id_or_slot)
+        except ValueError as e:
+            print_error(str(e))
+            raise typer.Exit(1)
+    print_success(f"[{stream_name}] Closed pin cluster  pin_id={pin_id}")
 
 
 # ---------------------------------------------------------------------------
@@ -394,15 +479,15 @@ def unpin(
 # ---------------------------------------------------------------------------
 
 @app.command("open")
-def open_stream(stream_id: str = typer.Argument(...)):
-    """Open a stream in the browser or default app; records an open event."""
+def open_link(link_id: str = typer.Argument(...)):
+    """Open a link in the browser; records an open event."""
     _ensure_init()
     with get_conn(DB_PATH) as db:
-        row = db.execute("SELECT * FROM streams WHERE id = ?", (stream_id,)).fetchone()
+        row = db.execute("SELECT * FROM links WHERE id = ?", (link_id,)).fetchone()
         if not row:
-            print_error(f"Stream {stream_id} not found.")
+            print_error(f"Link {link_id} not found.")
             raise typer.Exit(1)
-        record(db, "open", stream_id=stream_id)
+        record(db, "open", stream_id=link_id)
         target = row["source"] if row["kind"] == "url" else (row["artifact_path"] or row["source"])
 
     if sys.platform == "darwin":
@@ -421,29 +506,28 @@ def open_stream(stream_id: str = typer.Argument(...)):
 @app.command()
 def connections(
     pending: bool = typer.Option(False, "--pending"),
-    channel: Optional[str] = typer.Option(None, "--channel", "-c"),
+    stream: Optional[str] = typer.Option(None, "--stream", "-s"),
     link: bool = typer.Option(False, "-l", "--link"),
     as_json: bool = typer.Option(False, "-j", "--json"),
     pretty: bool = typer.Option(False, "-P", "--pretty"),
-    select: Optional[str] = typer.Option(None, "-s", "--select"),
+    select: Optional[str] = typer.Option(None, "--select"),
     n: Optional[int] = typer.Option(None, "-n"),
 ):
-    """List connections between streams and pins in the active channel."""
+    """List connections between links and pin clusters."""
     _ensure_init()
     with get_conn(DB_PATH) as db:
-        channel_id, channel_name = _active_channel(db, channel)
+        stream_id, stream_name = _active_stream(db, stream)
         query = """
-            SELECT c.id, c.stream_id, c.pin_id, c.similarity, c.llm_note,
+            SELECT c.id, c.link_id, c.pin_id, c.similarity, c.llm_note,
                    c.confirmed, c.source, c.created_at,
-                   s.title as stream_title, s.source as stream_source, s.artifact_path,
-                   ps.title as pin_title
+                   l.title as link_title, l.source as link_source, l.artifact_path,
+                   p.name as pin_name
             FROM connections c
-            JOIN streams s ON s.id = c.stream_id
+            JOIN links l ON l.id = c.link_id
             JOIN pins p ON p.id = c.pin_id
-            JOIN streams ps ON ps.id = p.stream_id
-            WHERE p.channel_id = ?
+            WHERE p.stream_id = ?
         """
-        params = [channel_id]
+        params = [stream_id]
         if pending:
             query += " AND c.confirmed = FALSE"
         query += " ORDER BY c.similarity DESC"
@@ -452,15 +536,14 @@ def connections(
     if as_json or link:
         emit(rows, link_only=link, as_json=as_json, pretty=pretty, select_fields=select, limit=n)
         return
-
     if not rows:
-        print_info(f"No connections in channel '{channel_name}'.")
+        print_info(f"No connections in stream '{stream_name}'.")
         return
     if n:
         rows = rows[:n]
     for row in rows:
         status = "[green]✓ confirmed[/green]" if row["confirmed"] else "[yellow]? pending[/yellow]"
-        console.print(f"\n[bold]{row['stream_title']}[/bold]  →  [magenta]{row['pin_title']}[/magenta]  {status}")
+        console.print(f"\n[bold]{row['link_title']}[/bold]  →  [magenta]{row['pin_name']}[/magenta]  {status}")
         console.print(f"  [dim]id: {row['id']}  sim: {row['similarity']:.2f}  source: {row['source']}[/dim]")
         if row["llm_note"]:
             console.print(f"  [italic]{row['llm_note']}[/italic]")
@@ -498,15 +581,15 @@ def reject(conn_id: str = typer.Argument(...)):
 
 @app.command()
 def link(
-    stream_id: str = typer.Argument(...),
+    link_id: str = typer.Argument(...),
     pin_id: str = typer.Argument(...),
     note: Optional[str] = typer.Option(None, "--note", "-n"),
 ):
-    """Manually link a stream to a pin (always confirmed)."""
+    """Manually link a link to a pin cluster (always confirmed)."""
     _ensure_init()
     with get_conn(DB_PATH) as db:
         try:
-            cid = conn_mod.manual_link(db, stream_id, pin_id, note=note)
+            cid = conn_mod.manual_link(db, link_id, pin_id, note=note)
         except ValueError as e:
             print_error(str(e))
             raise typer.Exit(1)
@@ -519,19 +602,19 @@ def link(
 
 @app.command()
 def lab(
-    channel: Optional[str] = typer.Option(None, "--channel", "-c"),
+    stream: Optional[str] = typer.Option(None, "--stream", "-s"),
     link: bool = typer.Option(False, "-l", "--link"),
     as_json: bool = typer.Option(False, "-j", "--json"),
     pretty: bool = typer.Option(False, "-P", "--pretty"),
-    select: Optional[str] = typer.Option(None, "-s", "--select"),
+    select: Optional[str] = typer.Option(None, "--select"),
     n: int = typer.Option(20, "-n"),
 ):
-    """Show unpinned streams gaining traction in the active channel."""
+    """Show unpinned links gaining traction."""
     _ensure_init()
     cfg = Config.load()
     with get_conn(DB_PATH) as db:
-        channel_id, channel_name = _active_channel(db, channel)
-        rows = lab_scores(db, channel_id=channel_id, half_life_days=cfg.half_life_days, limit=n)
+        stream_id, stream_name = _active_stream(db, stream)
+        rows = lab_scores(db, stream_id=stream_id, half_life_days=cfg.half_life_days, limit=n)
     emit(rows, link_only=link, as_json=as_json, pretty=pretty, select_fields=select, limit=n)
 
 
@@ -540,53 +623,53 @@ def lab(
 # ---------------------------------------------------------------------------
 
 @app.command()
-def why(stream_id: str = typer.Argument(...)):
-    """Show the event timeline for a stream."""
+def why(link_id: str = typer.Argument(...)):
+    """Show the event timeline for a link."""
     _ensure_init()
     with get_conn(DB_PATH) as db:
-        stream = db.execute("SELECT title FROM streams WHERE id = ?", (stream_id,)).fetchone()
-        if not stream:
-            print_error(f"Stream {stream_id} not found.")
+        lnk = db.execute("SELECT title FROM links WHERE id = ?", (link_id,)).fetchone()
+        if not lnk:
+            print_error(f"Link {link_id} not found.")
             raise typer.Exit(1)
         events = db.execute(
             "SELECT event_type, occurred_at, metadata_json FROM events WHERE stream_id = ? ORDER BY occurred_at",
-            (stream_id,),
+            (link_id,),
         ).fetchall()
 
-    console.print(f"\n[bold]Timeline for:[/bold] {stream['title']}")
+    console.print(f"\n[bold]Timeline for:[/bold] {lnk['title']}")
     for ev in events:
         meta = json.loads(ev["metadata_json"]) if ev["metadata_json"] else {}
         console.print(f"  [cyan]{ev['occurred_at']}[/cyan]  [bold]{ev['event_type']}[/bold]  {meta}")
     if not events:
-        print_info("No events recorded for this stream yet.")
+        print_info("No events recorded for this link yet.")
 
 
 # ---------------------------------------------------------------------------
 # edit
 # ---------------------------------------------------------------------------
 
-edit_app = typer.Typer(help="Edit stream or pin fields in $EDITOR.")
+edit_app = typer.Typer(help="Edit link or pin fields in $EDITOR.")
 app.add_typer(edit_app, name="edit")
 
 
 @edit_app.callback(invoke_without_command=True)
-def edit_stream(
+def edit_link(
     ctx: typer.Context,
-    stream_id: Optional[str] = typer.Argument(None),
+    link_id: Optional[str] = typer.Argument(None),
 ):
-    """Edit a stream's editable fields (title, note)."""
+    """Edit a link's editable fields (title, note)."""
     if ctx.invoked_subcommand:
         return
-    if not stream_id:
-        print_error("Provide a stream ID or use: pinboard edit pin <id>")
+    if not link_id:
+        print_error("Provide a link ID or use: pinboard edit pin <id>")
         raise typer.Exit(1)
 
     _ensure_init()
     cfg = Config.load()
     with get_conn(DB_PATH) as db:
-        row = db.execute("SELECT * FROM streams WHERE id = ?", (stream_id,)).fetchone()
+        row = db.execute("SELECT * FROM links WHERE id = ?", (link_id,)).fetchone()
         if not row:
-            print_error(f"Stream {stream_id} not found.")
+            print_error(f"Link {link_id} not found.")
             raise typer.Exit(1)
 
         import yaml
@@ -603,7 +686,7 @@ def edit_stream(
 
         try:
             updated = yaml.safe_load(edited)
-        except yaml.YAMLError as e:
+        except Exception as e:
             print_error(f"Invalid YAML: {e}")
             raise typer.Exit(1)
 
@@ -612,29 +695,29 @@ def edit_stream(
             return
 
         db.execute(
-            "UPDATE streams SET title = ?, note = ? WHERE id = ?",
-            (updated.get("title", row["title"]), updated.get("note") or None, stream_id),
+            "UPDATE links SET title = ?, note = ? WHERE id = ?",
+            (updated.get("title", row["title"]), updated.get("note") or None, link_id),
         )
-        record(db, "edit", stream_id=stream_id, metadata={"fields": list(updated.keys())})
+        record(db, "edit", stream_id=link_id, metadata={"fields": list(updated.keys())})
 
-    print_success(f"Stream {stream_id} updated.")
+    print_success(f"Link {link_id} updated.")
 
 
 @edit_app.command("pin")
 def edit_pin(id_or_slot: str = typer.Argument(...)):
-    """Edit a pin's note in $EDITOR."""
+    """Edit a pin cluster's name and note in $EDITOR."""
     _ensure_init()
     cfg = Config.load()
     with get_conn(DB_PATH) as db:
-        channel_id, _ = _active_channel(db)
-        pin_id = pin_mod.resolve_pin_id(db, channel_id, id_or_slot)
+        stream_id, _ = _active_stream(db)
+        pin_id = pin_mod.resolve_pin_id(db, stream_id, id_or_slot)
         if not pin_id:
-            print_error(f"No active pin found for: {id_or_slot}")
+            print_error(f"No active pin cluster found for: {id_or_slot}")
             raise typer.Exit(1)
 
         row = db.execute("SELECT * FROM pins WHERE id = ?", (pin_id,)).fetchone()
         import yaml
-        buffer = {"note": row["note"] or ""}
+        buffer = {"name": row["name"], "note": row["note"] or ""}
         original = yaml.dump(buffer, allow_unicode=True)
 
         with tempfile.NamedTemporaryFile(suffix=".yaml", mode="w", delete=False) as tf:
@@ -647,7 +730,7 @@ def edit_pin(id_or_slot: str = typer.Argument(...)):
 
         try:
             updated = yaml.safe_load(edited)
-        except yaml.YAMLError as e:
+        except Exception as e:
             print_error(f"Invalid YAML: {e}")
             raise typer.Exit(1)
 
@@ -655,10 +738,13 @@ def edit_pin(id_or_slot: str = typer.Argument(...)):
             print_info("No changes.")
             return
 
-        db.execute("UPDATE pins SET note = ? WHERE id = ?", (updated.get("note") or None, pin_id))
-        record(db, "edit", pin_id=pin_id, metadata={"fields": ["note"]})
+        db.execute(
+            "UPDATE pins SET name = ?, note = ? WHERE id = ?",
+            (updated.get("name", row["name"]), updated.get("note") or None, pin_id),
+        )
+        record(db, "edit", pin_id=pin_id, metadata={"fields": list(updated.keys())})
 
-    print_success(f"Pin {pin_id} updated.")
+    print_success(f"Pin cluster {pin_id} updated.")
 
 
 # ---------------------------------------------------------------------------
@@ -668,29 +754,29 @@ def edit_pin(id_or_slot: str = typer.Argument(...)):
 @app.command()
 def search(
     query: str = typer.Argument(...),
-    channel: Optional[str] = typer.Option(None, "--channel", "-c"),
+    stream: Optional[str] = typer.Option(None, "--stream", "-s"),
     link: bool = typer.Option(False, "-l", "--link"),
     as_json: bool = typer.Option(False, "-j", "--json"),
     pretty: bool = typer.Option(False, "-P", "--pretty"),
-    select: Optional[str] = typer.Option(None, "-s", "--select"),
+    select: Optional[str] = typer.Option(None, "--select"),
     n: int = typer.Option(10, "-n"),
 ):
-    """Semantic search over streams in the active channel."""
+    """Semantic search over links in the active stream."""
     _ensure_init()
     cfg = Config.load()
     from .embeddings import build_service, deserialize, cosine_similarity
     embedder = build_service(cfg)
     if not embedder:
-        print_error("No embedding service configured. Set openai_api_key or embedding_provider=local.")
+        print_error("No embedding service configured.")
         raise typer.Exit(1)
 
     query_vec = embedder.embed(query)
 
     with get_conn(DB_PATH) as db:
-        channel_id, _ = _active_channel(db, channel)
+        stream_id, _ = _active_stream(db, stream)
         rows = db.execute(
-            "SELECT id, title, kind, source, artifact_path, embedding FROM streams WHERE channel_id = ? AND embedding IS NOT NULL",
-            (channel_id,),
+            "SELECT id, title, kind, source, artifact_path, embedding FROM links WHERE stream_id = ? AND embedding IS NOT NULL",
+            (stream_id,),
         ).fetchall()
 
     results = []
@@ -713,27 +799,26 @@ def search(
 @app.command()
 def graph(
     pin_id: Optional[str] = typer.Option(None, "--pin"),
-    channel: Optional[str] = typer.Option(None, "--channel", "-c"),
+    stream: Optional[str] = typer.Option(None, "--stream", "-s"),
     as_json: bool = typer.Option(False, "-j", "--json"),
     pretty: bool = typer.Option(False, "-P", "--pretty"),
-    select: Optional[str] = typer.Option(None, "-s", "--select"),
+    select: Optional[str] = typer.Option(None, "--select"),
     n: Optional[int] = typer.Option(None, "-n"),
 ):
-    """Show the confirmed connection graph for the active channel."""
+    """Show the confirmed connection graph."""
     _ensure_init()
     with get_conn(DB_PATH) as db:
-        channel_id, channel_name = _active_channel(db, channel)
+        stream_id, stream_name = _active_stream(db, stream)
         q = """
             SELECT c.id, c.similarity, c.confirmed, c.source, c.llm_note,
-                   s.title as stream_title, s.kind as stream_kind, s.source as stream_source,
-                   s.artifact_path, ps.title as pin_title, p.id as pin_id
+                   l.title as link_title, l.kind as link_kind, l.source as link_source,
+                   l.artifact_path, p.name as pin_name, p.id as pin_id
             FROM connections c
-            JOIN streams s ON s.id = c.stream_id
+            JOIN links l ON l.id = c.link_id
             JOIN pins p ON p.id = c.pin_id
-            JOIN streams ps ON ps.id = p.stream_id
-            WHERE c.confirmed = TRUE AND p.channel_id = ?
+            WHERE c.confirmed = TRUE AND p.stream_id = ?
         """
-        params = [channel_id]
+        params = [stream_id]
         if pin_id:
             q += " AND c.pin_id = ?"
             params.append(pin_id)
@@ -744,20 +829,19 @@ def graph(
         out = [_pick_select(r, select) for r in rows]
         print(json.dumps(out, indent=2 if pretty else None, default=str))
         return
-
     if not rows:
-        print_info(f"No confirmed connections in channel '{channel_name}'.")
+        print_info(f"No confirmed connections in stream '{stream_name}'.")
         return
 
     by_pin: dict[str, list] = {}
     for r in rows:
-        by_pin.setdefault(r["pin_title"], []).append(r)
+        by_pin.setdefault(r["pin_name"], []).append(r)
 
-    console.print(f"\n[bold cyan]Channel: {channel_name}[/bold cyan]")
+    console.print(f"\n[bold cyan]Stream: {stream_name}[/bold cyan]")
     for pt, edges in by_pin.items():
         console.print(f"\n[bold magenta]★ {pt}[/bold magenta]")
         for e in edges:
-            console.print(f"  ✓ {e['stream_title']} [dim](sim={e['similarity']:.2f})[/dim]")
+            console.print(f"  ✓ {e['link_title']} [dim](sim={e['similarity']:.2f})[/dim]")
             if e["llm_note"]:
                 console.print(f"    [italic]{e['llm_note']}[/italic]")
 
@@ -776,29 +860,32 @@ def _pick_select(row: dict, select: str | None) -> dict:
 @app.command("export")
 def export_data(
     fmt: str = typer.Option("json", "--format", "-f"),
-    channel: Optional[str] = typer.Option(None, "--channel", "-c", help="Export specific channel (default: all)"),
+    stream: Optional[str] = typer.Option(None, "--stream", "-s", help="Export specific stream (default: all)"),
 ):
     """Export all data for backup."""
     _ensure_init()
     with get_conn(DB_PATH) as db:
-        channels_rows = [dict(r) for r in db.execute("SELECT * FROM channels").fetchall()]
+        streams_rows = [dict(r) for r in db.execute("SELECT * FROM streams").fetchall()]
 
-        if channel:
-            channel_id, _ = _active_channel(db, channel)
-            streams = [dict(r) for r in db.execute("SELECT * FROM streams WHERE channel_id = ?", (channel_id,)).fetchall()]
-            pins_rows = [dict(r) for r in db.execute("SELECT * FROM pins WHERE channel_id = ?", (channel_id,)).fetchall()]
+        if stream:
+            stream_id, _ = _active_stream(db, stream)
+            links_rows = [dict(r) for r in db.execute("SELECT * FROM links WHERE stream_id = ?", (stream_id,)).fetchall()]
+            pins_rows = [dict(r) for r in db.execute("SELECT * FROM pins WHERE stream_id = ?", (stream_id,)).fetchall()]
         else:
-            streams = [dict(r) for r in db.execute("SELECT * FROM streams").fetchall()]
+            links_rows = [dict(r) for r in db.execute("SELECT * FROM links").fetchall()]
             pins_rows = [dict(r) for r in db.execute("SELECT * FROM pins").fetchall()]
 
+        pin_links_rows = [dict(r) for r in db.execute("SELECT * FROM pin_links").fetchall()]
         conn_rows = [dict(r) for r in db.execute("SELECT * FROM connections").fetchall()]
         events_rows = [dict(r) for r in db.execute("SELECT * FROM events").fetchall()]
 
-        for s in streams:
-            s.pop("embedding", None)
+        for l in links_rows:
+            l.pop("embedding", None)
 
-    out = {"channels": channels_rows, "streams": streams, "pins": pins_rows,
-           "connections": conn_rows, "events": events_rows}
+    out = {
+        "streams": streams_rows, "links": links_rows, "pins": pins_rows,
+        "pin_links": pin_links_rows, "connections": conn_rows, "events": events_rows,
+    }
     print(json.dumps(out, indent=2, default=str))
 
 
@@ -808,19 +895,19 @@ def export_data(
 
 @app.command()
 def skills(
-    channel: Optional[str] = typer.Option(None, "--channel", "-c"),
+    stream: Optional[str] = typer.Option(None, "--stream", "-s"),
 ):
-    """Show the decomposed skills for all active pins in the channel."""
+    """Show the decomposed skills for all active pin clusters."""
     _ensure_init()
     with get_conn(DB_PATH) as db:
-        channel_id, channel_name = _active_channel(db, channel)
-        all_skills = skills_mod.get_skills_for_channel(db, channel_id)
+        stream_id, stream_name = _active_stream(db, stream)
+        all_skills = skills_mod.get_skills_for_stream(db, stream_id)
 
     if not all_skills:
-        print_info(f"No skills yet in '{channel_name}'. Pin something to generate a skill.")
+        print_info(f"No skills yet in '{stream_name}'. Add links to a pin cluster to generate a skill.")
         return
 
-    console.print(f"\n[bold cyan]Pin Skills — #{channel_name}[/bold cyan]\n")
+    console.print(f"\n[bold cyan]Pin Skills — #{stream_name}[/bold cyan]\n")
     for s in all_skills:
         console.print(f"[bold magenta]★ {s['pin_title']}[/bold magenta]")
         console.print(f"  [bold]Themes:[/bold] {', '.join(s['themes'])}")
@@ -853,7 +940,7 @@ def digest(
         data = build_digest(db, cfg)
 
     if not data:
-        print_info("No streams to digest yet. Add some streams first.")
+        print_info("No links to digest yet. Add some links first.")
         return
 
     date_str = datetime.now(timezone.utc).strftime("%A, %B %-d %Y")
@@ -869,10 +956,30 @@ def digest(
 
     ok = send_telegram(cfg, data, date_str)
     if ok:
-        print_success(f"Digest sent to Telegram ({len(data)} channel(s) — one message each)")
+        print_success(f"Digest sent to Telegram ({len(data)} stream(s))")
     else:
-        print_error("Failed to send Telegram message. Check your token and chat_id.")
+        print_error("Failed to send Telegram message.")
         raise typer.Exit(1)
+
+
+# ---------------------------------------------------------------------------
+# serve
+# ---------------------------------------------------------------------------
+
+@app.command()
+def serve(
+    host: str = typer.Option("127.0.0.1", "--host"),
+    port: int = typer.Option(5000, "--port"),
+):
+    """Start the Pinboard web UI server."""
+    try:
+        import uvicorn
+    except ImportError:
+        print_error("uvicorn not installed. Run: pip install 'pinboard[web]'")
+        raise typer.Exit(1)
+    _ensure_init()
+    print_success(f"Pinboard UI at http://{host}:{port}")
+    uvicorn.run("pinboard.api:app", host=host, port=port, reload=False)
 
 
 if __name__ == "__main__":

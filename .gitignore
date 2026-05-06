@@ -8,3 +8,7 @@ build/
 *.toml
 *.toml.local
 .pytest_cache/
+.DS_Store
+src/.DS_Store
+*.env
+.env.*

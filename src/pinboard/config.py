@@ -16,8 +16,17 @@ _GDRIVE_DB = (
     Path.home()
     / "Library/CloudStorage/GoogleDrive-sachben91@gmail.com/My Drive/pinboard/pinboard.db"
 )
-DB_PATH = _GDRIVE_DB if _GDRIVE_DB.parent.exists() else PINBOARD_DIR / "pinboard.db"
-ARTIFACTS_DIR = PINBOARD_DIR / "artifacts"
+
+def _resolve_db_path() -> Path:
+    if env := os.environ.get("PINBOARD_DB_PATH"):
+        return Path(env)
+    if _GDRIVE_DB.parent.exists():
+        return _GDRIVE_DB
+    return PINBOARD_DIR / "pinboard.db"
+
+import os
+DB_PATH = _resolve_db_path()
+ARTIFACTS_DIR = Path(os.environ.get("PINBOARD_ARTIFACTS_DIR", str(PINBOARD_DIR / "artifacts")))
 
 
 @dataclass

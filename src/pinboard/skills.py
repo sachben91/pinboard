@@ -1,9 +1,4 @@
-"""Pin skill generation and retrieval.
-
-When a stream is pinned, Claude decomposes it into themes, questions,
-adjacent concepts, and search signals. These skills drive web discovery
-in the digest and improve connection detection.
-"""
+"""Pin skill generation and retrieval."""
 
 from __future__ import annotations
 
@@ -19,7 +14,7 @@ def _new_id() -> str:
 
 
 def generate_skill(cfg, pin_id: str, title: str, content_text: str) -> dict | None:
-    """Call Claude to decompose a pinned item. Returns skill dict or None."""
+    """Call Claude to decompose a pin cluster's content. Returns skill dict or None."""
     if not cfg.anthropic_api_key or not content_text:
         return None
     try:
@@ -31,7 +26,7 @@ def generate_skill(cfg, pin_id: str, title: str, content_text: str) -> dict | No
             messages=[{
                 "role": "user",
                 "content": (
-                    f"A reader has pinned this item as a current focus:\n\n"
+                    f"A reader has pinned this as a current focus:\n\n"
                     f"Title: {title}\n\n"
                     f"Excerpt:\n{content_text[:1500]}\n\n"
                     "Decompose this into its intellectual sub-components. "
@@ -48,7 +43,6 @@ def generate_skill(cfg, pin_id: str, title: str, content_text: str) -> dict | No
             }],
         )
         raw = msg.content[0].text.strip()
-        # Strip markdown code fences if present
         if raw.startswith("```"):
             raw = raw.split("```")[1]
             if raw.startswith("json"):
@@ -78,34 +72,29 @@ def save_skill(conn: sqlite3.Connection, pin_id: str, skill: dict) -> str:
     return skill_id
 
 
-def get_skills_for_channel(conn: sqlite3.Connection, channel_id: str) -> list[dict]:
-    """Return all skills for active pins in a channel."""
+def get_skills_for_stream(conn: sqlite3.Connection, stream_id: str) -> list[dict]:
+    """Return all skills for active pin clusters in a stream."""
     rows = conn.execute(
         """
-        SELECT ps.*, s.title as pin_title
+        SELECT ps.*, p.name as pin_name
         FROM pin_skills ps
         JOIN pins p ON p.id = ps.pin_id
-        JOIN streams s ON s.id = p.stream_id
-        WHERE p.channel_id = ? AND p.unpinned_at IS NULL
+        WHERE p.stream_id = ? AND p.closed_at IS NULL
         ORDER BY p.slot_order
         """,
-        (channel_id,),
+        (stream_id,),
     ).fetchall()
-    result = []
-    for r in rows:
-        result.append({
-            "pin_id": r["pin_id"],
-            "pin_title": r["pin_title"],
-            "themes": json.loads(r["themes"]),
-            "questions": json.loads(r["questions"]),
-            "adjacent": json.loads(r["adjacent"]),
-            "search_signals": json.loads(r["search_signals"]),
-        })
-    return result
+    return [{
+        "pin_id": r["pin_id"],
+        "pin_title": r["pin_name"],
+        "themes": json.loads(r["themes"]),
+        "questions": json.loads(r["questions"]),
+        "adjacent": json.loads(r["adjacent"]),
+        "search_signals": json.loads(r["search_signals"]),
+    } for r in rows]
 
 
 def all_search_signals(skills: list[dict]) -> list[str]:
-    """Flatten all search signals across all pin skills."""
     signals = []
     for s in skills:
         signals.extend(s.get("search_signals", []))

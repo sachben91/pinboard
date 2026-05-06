@@ -1,4 +1,4 @@
-"""Connection detection between streams and pins — Claude-first, embedding fallback."""
+"""Connection detection between links and pin clusters — Claude-first, embedding fallback."""
 
 from __future__ import annotations
 
@@ -13,9 +13,8 @@ def _new_id() -> str:
     return str(uuid.uuid4())
 
 
-def _claude_judge(cfg, stream_excerpt: str, pin_excerpt: str) -> tuple[bool, str | None]:
-    """Ask Claude if two passages are conceptually connected.
-    Returns (is_connected, explanation)."""
+def _claude_judge(cfg, link_excerpt: str, pin_excerpt: str) -> tuple[bool, str | None]:
+    """Ask Claude if a link and a pin cluster context are conceptually connected."""
     if not cfg.anthropic_api_key:
         return False, None
     try:
@@ -31,7 +30,7 @@ def _claude_judge(cfg, stream_excerpt: str, pin_excerpt: str) -> tuple[bool, str
                     "They have pinned the following as a current focus:\n"
                     f"PIN:\n{pin_excerpt[:800]}\n\n"
                     "They just captured this new item:\n"
-                    f"STREAM:\n{stream_excerpt[:800]}\n\n"
+                    f"LINK:\n{link_excerpt[:800]}\n\n"
                     "Are these conceptually connected in any meaningful way — "
                     "even if the surface topics seem different? Think about underlying themes, "
                     "questions, tensions, or ideas that both might be exploring.\n\n"
@@ -51,79 +50,120 @@ def _claude_judge(cfg, stream_excerpt: str, pin_excerpt: str) -> tuple[bool, str
         return False, None
 
 
-def _embedding_fallback(cfg, stream_vec, pin_vec) -> tuple[bool, None]:
-    """Fall back to cosine similarity if no Anthropic key."""
-    sim = cosine_similarity(stream_vec, pin_vec)
+def _embedding_fallback(cfg, link_vec, pin_vec) -> tuple[bool, None]:
+    sim = cosine_similarity(link_vec, pin_vec)
     return sim >= cfg.connection_threshold, None
 
 
-def auto_suggest(conn: sqlite3.Connection, stream_id: str, cfg, channel_id: str) -> list[str]:
-    """Check new stream against active pins in the channel using Claude (or embedding fallback).
-    Returns list of created connection ids."""
-    stream = conn.execute(
-        "SELECT embedding, content_text FROM streams WHERE id = ?", (stream_id,)
+def _pin_aggregate(conn: sqlite3.Connection, pin_id: str) -> tuple[str, bytes | None]:
+    """Return (excerpt, avg_embedding) from all links in a pin cluster."""
+    import numpy as np
+    rows = conn.execute(
+        """
+        SELECT l.content_text, l.embedding
+        FROM pin_links pl JOIN links l ON l.id = pl.link_id
+        WHERE pl.pin_id = ?
+        ORDER BY pl.added_at
+        """,
+        (pin_id,),
+    ).fetchall()
+    if not rows:
+        return "", None
+
+    n = len(rows)
+    per_link = max(1, 800 // n)
+    excerpt = "\n---\n".join((r["content_text"] or "")[:per_link] for r in rows if r["content_text"])
+
+    vecs = [deserialize(r["embedding"]) for r in rows if r["embedding"]]
+    if not vecs:
+        return excerpt, None
+    avg = np.mean(vecs, axis=0)
+    from .embeddings import serialize
+    return excerpt, serialize(avg)
+
+
+def prepare_auto_connections(conn: sqlite3.Connection, link_id: str, cfg, stream_id: str) -> list[dict]:
+    """Read pin context from DB and call Claude/embeddings. No DB writes — safe to call in parallel.
+    Returns list of connection dicts ready to pass to write_auto_connections."""
+    link = conn.execute(
+        "SELECT embedding, content_text FROM links WHERE id = ?", (link_id,)
     ).fetchone()
-    if not stream or not stream["content_text"]:
+    if not link or not link["content_text"]:
         return []
 
-    stream_excerpt = (stream["content_text"] or "")[:800]
-    stream_vec = deserialize(stream["embedding"]) if stream["embedding"] else None
+    link_excerpt = (link["content_text"] or "")[:800]
+    link_vec = deserialize(link["embedding"]) if link["embedding"] else None
 
     active_pins = conn.execute(
-        """
-        SELECT p.id as pin_id, s.embedding, s.content_text
-        FROM pins p
-        JOIN streams s ON s.id = p.stream_id
-        WHERE p.channel_id = ? AND p.unpinned_at IS NULL
-        """,
-        (channel_id,),
+        "SELECT id as pin_id FROM pins WHERE stream_id = ? AND closed_at IS NULL",
+        (stream_id,),
     ).fetchall()
 
-    created = []
+    existing_pins = {
+        row["pin_id"]
+        for row in conn.execute(
+            "SELECT pin_id FROM connections WHERE link_id = ?", (link_id,)
+        ).fetchall()
+    }
+
+    pending = []
     for pin_row in active_pins:
-        # Skip if connection already exists
-        existing = conn.execute(
-            "SELECT id FROM connections WHERE stream_id = ? AND pin_id = ?",
-            (stream_id, pin_row["pin_id"]),
-        ).fetchone()
-        if existing:
+        pin_id = pin_row["pin_id"]
+        if pin_id in existing_pins:
             continue
 
-        pin_excerpt = (pin_row["content_text"] or "")[:800]
+        pin_excerpt, pin_emb_blob = _pin_aggregate(conn, pin_id)
+        if not pin_excerpt:
+            continue
 
-        # Use Claude if available, otherwise fall back to embeddings
         if cfg.anthropic_api_key:
-            connected, note = _claude_judge(cfg, stream_excerpt, pin_excerpt)
-            sim = cosine_similarity(
-                deserialize(stream["embedding"]), deserialize(pin_row["embedding"])
-            ) if stream["embedding"] and pin_row["embedding"] else 0.0
-        elif stream_vec is not None and pin_row["embedding"]:
-            pin_vec = deserialize(pin_row["embedding"])
-            connected, note = _embedding_fallback(cfg, stream_vec, pin_vec)
-            sim = cosine_similarity(stream_vec, pin_vec)
+            connected, note = _claude_judge(cfg, link_excerpt, pin_excerpt)
+            pin_vec = deserialize(pin_emb_blob) if pin_emb_blob else None
+            sim = cosine_similarity(link_vec, pin_vec) if link_vec is not None and pin_vec is not None else 0.0
+        elif link_vec is not None and pin_emb_blob:
+            pin_vec = deserialize(pin_emb_blob)
+            connected, note = _embedding_fallback(cfg, link_vec, pin_vec)
+            sim = cosine_similarity(link_vec, pin_vec)
         else:
             continue
 
         if not connected:
             continue
 
-        conn_id = _new_id()
+        pending.append({
+            "conn_id": _new_id(),
+            "link_id": link_id,
+            "pin_id": pin_id,
+            "similarity": sim,
+            "note": note,
+        })
+    return pending
+
+
+def write_auto_connections(conn: sqlite3.Connection, pending: list[dict]) -> list[str]:
+    """Write prepared connection dicts to the DB. Returns list of created connection ids."""
+    created = []
+    for c in pending:
         conn.execute(
             """
-            INSERT INTO connections (id, stream_id, pin_id, similarity, llm_note, confirmed, source, created_at)
+            INSERT OR IGNORE INTO connections (id, link_id, pin_id, similarity, llm_note, confirmed, source, created_at)
             VALUES (?, ?, ?, ?, ?, FALSE, 'auto', ?)
             """,
-            (conn_id, stream_id, pin_row["pin_id"], sim, note, now_utc()),
+            (c["conn_id"], c["link_id"], c["pin_id"], c["similarity"], c["note"], now_utc()),
         )
         record(
-            conn,
-            "suggest_connection",
-            stream_id=stream_id,
-            pin_id=pin_row["pin_id"],
-            metadata={"similarity": sim, "connection_id": conn_id},
+            conn, "suggest_connection",
+            stream_id=c["link_id"], pin_id=c["pin_id"],
+            metadata={"similarity": c["similarity"], "connection_id": c["conn_id"]},
         )
-        created.append(conn_id)
+        created.append(c["conn_id"])
     return created
+
+
+def auto_suggest(conn: sqlite3.Connection, link_id: str, cfg, stream_id: str) -> list[str]:
+    """Check new link against active pin clusters. Returns list of created connection ids."""
+    pending = prepare_auto_connections(conn, link_id, cfg, stream_id)
+    return write_auto_connections(conn, pending)
 
 
 def confirm_connection(conn: sqlite3.Connection, conn_id: str) -> None:
@@ -131,7 +171,7 @@ def confirm_connection(conn: sqlite3.Connection, conn_id: str) -> None:
     if not row:
         raise ValueError(f"Connection {conn_id} not found.")
     conn.execute("UPDATE connections SET confirmed = TRUE WHERE id = ?", (conn_id,))
-    record(conn, "confirm_connection", stream_id=row["stream_id"], pin_id=row["pin_id"],
+    record(conn, "confirm_connection", stream_id=row["link_id"], pin_id=row["pin_id"],
            metadata={"connection_id": conn_id})
 
 
@@ -140,22 +180,22 @@ def reject_connection(conn: sqlite3.Connection, conn_id: str) -> None:
     if not row:
         raise ValueError(f"Connection {conn_id} not found.")
     conn.execute("DELETE FROM connections WHERE id = ?", (conn_id,))
-    record(conn, "reject_connection", stream_id=row["stream_id"], pin_id=row["pin_id"],
+    record(conn, "reject_connection", stream_id=row["link_id"], pin_id=row["pin_id"],
            metadata={"connection_id": conn_id})
 
 
 def manual_link(
-    conn: sqlite3.Connection, stream_id: str, pin_id: str, note: str | None = None
+    conn: sqlite3.Connection, link_id: str, pin_id: str, note: str | None = None
 ) -> str:
-    stream = conn.execute("SELECT id FROM streams WHERE id = ?", (stream_id,)).fetchone()
-    if not stream:
-        raise ValueError(f"Stream {stream_id} not found.")
+    link = conn.execute("SELECT id FROM links WHERE id = ?", (link_id,)).fetchone()
+    if not link:
+        raise ValueError(f"Link {link_id} not found.")
     pin = conn.execute("SELECT id FROM pins WHERE id = ?", (pin_id,)).fetchone()
     if not pin:
         raise ValueError(f"Pin {pin_id} not found.")
 
     existing = conn.execute(
-        "SELECT id FROM connections WHERE stream_id = ? AND pin_id = ?", (stream_id, pin_id)
+        "SELECT id FROM connections WHERE link_id = ? AND pin_id = ?", (link_id, pin_id)
     ).fetchone()
     if existing:
         conn.execute(
@@ -167,11 +207,11 @@ def manual_link(
     conn_id = _new_id()
     conn.execute(
         """
-        INSERT INTO connections (id, stream_id, pin_id, similarity, llm_note, confirmed, source, created_at)
+        INSERT INTO connections (id, link_id, pin_id, similarity, llm_note, confirmed, source, created_at)
         VALUES (?, ?, ?, 1.0, ?, TRUE, 'manual', ?)
         """,
-        (conn_id, stream_id, pin_id, note, now_utc()),
+        (conn_id, link_id, pin_id, note, now_utc()),
     )
-    record(conn, "manual_link", stream_id=stream_id, pin_id=pin_id,
+    record(conn, "manual_link", stream_id=link_id, pin_id=pin_id,
            metadata={"connection_id": conn_id})
     return conn_id
