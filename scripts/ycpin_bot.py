@@ -123,19 +123,19 @@ def _pick_link(stream_id: str) -> dict | None:
     never = [r for r in eligible if r["last_sent"] is None]
     pool = (never or eligible)[:5]
     row = random.choice(pool)
-        tags = json.loads(row["tags"]) if row["tags"] else []
-        text = row["content_text"] or ""
-        summary = (text[:400].strip() + "…") if len(text) > 400 else text.strip()
+    tags = json.loads(row["tags"]) if row["tags"] else []
+    text = row["content_text"] or ""
+    summary = (text[:400].strip() + "…") if len(text) > 400 else text.strip()
 
-        return {
-            "id": row["id"],
-            "title": row["title"],
-            "source": row["source"],
-            "summary": summary,
-            "posted_at": row["posted_at"],
-            "tags": tags,
-            "keep_count": row["keep_count"],
-        }
+    return {
+        "id": row["id"],
+        "title": row["title"],
+        "source": row["source"],
+        "summary": summary,
+        "posted_at": row["posted_at"],
+        "tags": tags,
+        "keep_count": row["keep_count"],
+    }
 
 
 def _record_review(message_id: str, link_id: str, channel_id: int, stream_id: str) -> None:
