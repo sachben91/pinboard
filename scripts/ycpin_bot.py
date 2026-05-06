@@ -24,6 +24,7 @@ import logging
 import os
 import sys
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 import discord
@@ -44,7 +45,8 @@ log = logging.getLogger("ycpin")
 TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
 CHANNEL_ID = int(os.environ.get("DISCORD_CHANNEL_ID", "709454740614021121"))
 STREAM_NAME = os.environ.get("YCPIN_STREAM", "Governance Studies")
-POST_HOUR_UTC = int(os.environ.get("YCPIN_HOUR", "9"))
+POST_HOUR_CENTRAL = int(os.environ.get("YCPIN_HOUR", "9"))
+_CENTRAL = ZoneInfo("America/Chicago")
 
 KEEP_EMOJI = "✅"
 DISCARD_EMOJI = "❌"
@@ -252,10 +254,9 @@ class YCPinBot(discord.Client):
 
         log.info(f"Link {link_id} → {outcome} by user {payload.user_id}")
 
-    @tasks.loop(hours=24)
+    @tasks.loop(hours=1)
     async def daily_post(self):
-        now_utc_hour = datetime.now(timezone.utc).hour
-        if now_utc_hour != POST_HOUR_UTC:
+        if datetime.now(_CENTRAL).hour != POST_HOUR_CENTRAL:
             return
         await self._post_review_link()
 
@@ -358,5 +359,5 @@ if __name__ == "__main__":
         sys.exit(1)
 
     init_db(DB_PATH)
-    log.info(f"Starting YCPin bot — posting to channel {CHANNEL_ID} at {POST_HOUR_UTC}:00 UTC daily")
+    log.info(f"Starting YCPin bot — posting to channel {CHANNEL_ID} at {POST_HOUR_CENTRAL}:00 Central daily")
     bot.run(TOKEN, log_handler=None)
