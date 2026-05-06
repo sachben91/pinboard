@@ -1,0 +1,8 @@
+[build]
+builder = "dockerfile"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "bash scripts/start_bot.sh"
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 3

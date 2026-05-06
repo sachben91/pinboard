@@ -5,7 +5,7 @@ dist/
 build/
 .venv/
 *.db
-*.toml
+config.toml
 *.toml.local
 .pytest_cache/
 .DS_Store
