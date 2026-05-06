@@ -197,7 +197,6 @@ class YCPinBot(discord.Client):
         self.stream_id: str | None = None
 
     async def setup_hook(self):
-        self.tree.copy_global_to(guild=None)
         await self.tree.sync()
         log.info("Slash commands synced")
 

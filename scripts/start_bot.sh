@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Startup script for Railway deployment.
 # Installs rclone, syncs the Pinboard DB from Google Drive, then starts the bot.
-set -e
+set -eo pipefail
+set +e  # don't abort on rclone failures
 
 DB_PATH="${PINBOARD_DB_PATH:-/data/pinboard.db}"
 RCLONE_REMOTE="${RCLONE_REMOTE:-gdrive:pinboard/pinboard.db}"
@@ -12,8 +13,15 @@ mkdir -p "$(dirname "$DB_PATH")"
 # Write rclone config from env var
 if [ -n "$RCLONE_CONFIG_CONTENT" ]; then
     mkdir -p ~/.config/rclone
-    printf '%s' "$RCLONE_CONFIG_CONTENT" > ~/.config/rclone/rclone.conf
-    echo "==> rclone config written"
+    # Use python to write the file to avoid shell escaping issues
+    python3 -c "
+import os, sys
+content = os.environ.get('RCLONE_CONFIG_CONTENT', '')
+path = os.path.expanduser('~/.config/rclone/rclone.conf')
+with open(path, 'w') as f:
+    f.write(content)
+print('==> rclone config written (' + str(len(content)) + ' bytes)')
+"
 fi
 
 # Download DB from GDrive
