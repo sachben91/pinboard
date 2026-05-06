@@ -291,9 +291,11 @@ class YCPinBot(discord.Client):
 
 
 def _build_embed(link: dict) -> discord.Embed:
+    source = link["source"] or ""
+    url = source if source.startswith(("http://", "https://")) else None
     embed = discord.Embed(
         title=link["title"],
-        url=link["source"] or discord.Embed.Empty,
+        url=url,
         color=EMBED_COLOR,
     )
     if link["summary"]:
