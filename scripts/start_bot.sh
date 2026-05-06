@@ -1,45 +1,13 @@
 #!/usr/bin/env bash
-# Startup script for Railway deployment.
-# Installs rclone, syncs the Pinboard DB from Google Drive, then starts the bot.
-set -eo pipefail
-set +e  # don't abort on rclone failures
+set -e
 
-DB_PATH="${PINBOARD_DB_PATH:-/data/pinboard.db}"
-RCLONE_REMOTE="${RCLONE_REMOTE:-gdrive:pinboard/pinboard.db}"
-
-echo "==> DB path: $DB_PATH"
-mkdir -p "$(dirname "$DB_PATH")"
-
-# Write rclone config from env var
-if [ -n "$RCLONE_CONFIG_CONTENT" ]; then
-    mkdir -p ~/.config/rclone
-    # Use python to write the file to avoid shell escaping issues
-    python3 -c "
-import os, sys
-content = os.environ.get('RCLONE_CONFIG_CONTENT', '')
-path = os.path.expanduser('~/.config/rclone/rclone.conf')
-with open(path, 'w') as f:
-    f.write(content)
-print('==> rclone config written (' + str(len(content)) + ' bytes)')
-"
-fi
-
-# Download DB from GDrive
-if command -v rclone &>/dev/null && [ -n "$RCLONE_REMOTE" ]; then
-    echo "==> Syncing DB from $RCLONE_REMOTE..."
-    rclone copyto "$RCLONE_REMOTE" "$DB_PATH" --retries 3 || echo "==> rclone sync failed, using existing DB"
-fi
-
-# Run migration in case schema is behind
+# Run DB migration/init
 python3 -c "
 import sys; sys.path.insert(0, '.')
-from src.pinboard.config import DB_PATH
 from src.pinboard.db import init_db
-init_db(DB_PATH)
+init_db()
 print('DB ready.')
 "
-
-export PINBOARD_DB_PATH="$DB_PATH"
 
 echo "==> Starting YCPin bot..."
 exec python3 scripts/ycpin_bot.py

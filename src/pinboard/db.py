@@ -1,15 +1,38 @@
-"""SQLite database initialization and connection management."""
+"""SQLite/PostgreSQL database initialization and connection management.
+
+When the DATABASE_URL environment variable is set, uses PostgreSQL via psycopg2.
+Otherwise falls back to SQLite for local dev and tests.
+"""
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
 
+# ---------------------------------------------------------------------------
+# PostgreSQL support (optional import)
+# ---------------------------------------------------------------------------
+
+try:
+    import psycopg2
+    import psycopg2.extras
+
+    HAS_PG = True
+except ImportError:
+    HAS_PG = False
+
+
+# ---------------------------------------------------------------------------
+# Schema constants
+# ---------------------------------------------------------------------------
+
 SCHEMA_VERSION = 7
 
+# SQLite DDL — kept fully intact for local dev and migrations
 DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER PRIMARY KEY
@@ -111,11 +134,181 @@ CREATE INDEX IF NOT EXISTS idx_discord_reviews_link ON discord_reviews(link_id);
 CREATE INDEX IF NOT EXISTS idx_discord_reviews_stream ON discord_reviews(stream_id);
 """
 
+# PostgreSQL DDL — BLOB→BYTEA, AUTOINCREMENT→BIGSERIAL, no partial index
+PG_DDL = """
+CREATE TABLE IF NOT EXISTS streams (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, created_at TIMESTAMP NOT NULL);
+CREATE TABLE IF NOT EXISTS links (id TEXT PRIMARY KEY, stream_id TEXT NOT NULL REFERENCES streams(id), kind TEXT NOT NULL, title TEXT NOT NULL, source TEXT, artifact_path TEXT, content_text TEXT, note TEXT, tags TEXT, created_at TIMESTAMP NOT NULL, posted_at TIMESTAMP, embedding BYTEA);
+CREATE TABLE IF NOT EXISTS pins (id TEXT PRIMARY KEY, stream_id TEXT NOT NULL REFERENCES streams(id), name TEXT NOT NULL, note TEXT, slot_order INTEGER NOT NULL, created_at TIMESTAMP NOT NULL, closed_at TIMESTAMP);
+CREATE TABLE IF NOT EXISTS pin_links (id TEXT PRIMARY KEY, pin_id TEXT NOT NULL REFERENCES pins(id), link_id TEXT NOT NULL REFERENCES links(id), added_at TIMESTAMP NOT NULL, UNIQUE(pin_id, link_id));
+CREATE TABLE IF NOT EXISTS pin_skills (id TEXT PRIMARY KEY, pin_id TEXT NOT NULL REFERENCES pins(id), themes TEXT NOT NULL, questions TEXT NOT NULL, adjacent TEXT NOT NULL, search_signals TEXT NOT NULL, created_at TIMESTAMP NOT NULL);
+CREATE TABLE IF NOT EXISTS connections (id TEXT PRIMARY KEY, link_id TEXT NOT NULL REFERENCES links(id), pin_id TEXT NOT NULL REFERENCES pins(id), similarity REAL NOT NULL, llm_note TEXT, confirmed BOOLEAN DEFAULT FALSE, source TEXT NOT NULL, created_at TIMESTAMP NOT NULL, UNIQUE(link_id, pin_id));
+CREATE TABLE IF NOT EXISTS events (id BIGSERIAL PRIMARY KEY, event_type TEXT NOT NULL, channel_id TEXT, stream_id TEXT, pin_id TEXT, metadata_json TEXT, occurred_at TIMESTAMP NOT NULL);
+CREATE TABLE IF NOT EXISTS discord_reviews (id BIGSERIAL PRIMARY KEY, message_id TEXT NOT NULL UNIQUE, link_id TEXT NOT NULL, channel_id TEXT NOT NULL, stream_id TEXT NOT NULL, posted_at TIMESTAMP NOT NULL, resolved_at TIMESTAMP, outcome TEXT);
+CREATE INDEX IF NOT EXISTS idx_events_stream ON events(stream_id, occurred_at);
+CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type, occurred_at);
+CREATE INDEX IF NOT EXISTS idx_pins_stream ON pins(stream_id, closed_at);
+CREATE INDEX IF NOT EXISTS idx_links_stream ON links(stream_id);
+CREATE INDEX IF NOT EXISTS idx_pin_links_pin ON pin_links(pin_id);
+CREATE INDEX IF NOT EXISTS idx_pin_links_link ON pin_links(link_id);
+CREATE INDEX IF NOT EXISTS idx_discord_reviews_link ON discord_reviews(link_id);
+CREATE INDEX IF NOT EXISTS idx_discord_reviews_stream ON discord_reviews(stream_id);
+"""
+
 DEFAULT_STREAM_ID = "00000000-0000-0000-0000-000000000001"
 DEFAULT_STREAM_NAME = "default"
 
 
-def init_db(db_path: Path) -> None:
+# ---------------------------------------------------------------------------
+# PostgreSQL compatibility wrappers
+# ---------------------------------------------------------------------------
+
+
+class _CompatRow(dict):
+    """A dict subclass that also supports integer index access.
+
+    psycopg2 with RealDictCursor returns plain dicts, but application code
+    uses ``row[0]`` for scalar results (e.g. COUNT queries).  This class
+    bridges both access patterns.
+    """
+
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return list(self.values())[key]
+        return super().__getitem__(key)
+
+
+class _PGCursor:
+    """Wraps a psycopg2 cursor so that fetchone/fetchall return _CompatRow."""
+
+    def __init__(self, cursor):
+        self._cur = cursor
+
+    def fetchone(self):
+        row = self._cur.fetchone()
+        if row is None:
+            return None
+        return _CompatRow(row)
+
+    def fetchall(self):
+        return [_CompatRow(r) for r in self._cur.fetchall()]
+
+    # Proxy everything else transparently
+    def __getattr__(self, name):
+        return getattr(self._cur, name)
+
+
+def _convert_sql(sql: str) -> str:
+    """Convert SQLite-style SQL to PostgreSQL-compatible SQL.
+
+    Transformations applied:
+    - ``?``  →  ``%s``  (parameter placeholder)
+    - ``INSERT OR IGNORE INTO tablename``  →  ``INSERT INTO tablename``
+      with ``ON CONFLICT DO NOTHING`` appended before any trailing semicolon
+    """
+    import re
+
+    # Replace ? placeholders with %s
+    sql = sql.replace("?", "%s")
+
+    # Handle INSERT OR IGNORE INTO  →  INSERT INTO ... ON CONFLICT DO NOTHING
+    pattern = re.compile(r"\bINSERT\s+OR\s+IGNORE\s+INTO\b", re.IGNORECASE)
+    if pattern.search(sql):
+        sql = pattern.sub("INSERT INTO", sql)
+        # Strip trailing semicolon, append ON CONFLICT DO NOTHING, restore semicolon
+        stripped = sql.rstrip()
+        if stripped.endswith(";"):
+            sql = stripped[:-1].rstrip() + " ON CONFLICT DO NOTHING;"
+        else:
+            sql = stripped + " ON CONFLICT DO NOTHING"
+
+    return sql
+
+
+class _PGConn:
+    """Wraps a psycopg2 connection with an SQLite-compatible interface.
+
+    Provides ``.execute()`` and ``.executemany()`` that auto-convert SQLite
+    syntax (``?`` params, ``INSERT OR IGNORE``) to PostgreSQL syntax.
+    Also wraps ``.cursor()`` to return ``_PGCursor`` instances.
+    """
+
+    def __init__(self, pg_conn):
+        self._conn = pg_conn
+
+    def execute(self, sql: str, params=None):
+        sql = _convert_sql(sql)
+        cur = self._conn.cursor()
+        if params is None:
+            cur.execute(sql)
+        else:
+            cur.execute(sql, params)
+        return _PGCursor(cur)
+
+    def executemany(self, sql: str, params_list):
+        sql = _convert_sql(sql)
+        cur = self._conn.cursor()
+        cur.executemany(sql, params_list)
+        return _PGCursor(cur)
+
+    def commit(self):
+        self._conn.commit()
+
+    def rollback(self):
+        self._conn.rollback()
+
+    def close(self):
+        self._conn.close()
+
+    # Proxy anything else (e.g. .cursor()) to the underlying connection
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+
+def _get_database_url() -> str | None:
+    """Return DATABASE_URL from env, normalising postgres:// → postgresql://."""
+    url = os.environ.get("DATABASE_URL")
+    if url and url.startswith("postgres://"):
+        url = "postgresql://" + url[len("postgres://"):]
+    return url
+
+
+def init_db(db_path: Path | None = None) -> None:
+    """Initialise the database schema.
+
+    Uses PostgreSQL when DATABASE_URL is set, otherwise SQLite at *db_path*.
+    """
+    database_url = _get_database_url()
+
+    if database_url:
+        if not HAS_PG:
+            raise RuntimeError(
+                "DATABASE_URL is set but psycopg2 is not installed. "
+                "Install it with: pip install psycopg2-binary"
+            )
+        pg_conn = psycopg2.connect(database_url, cursor_factory=psycopg2.extras.RealDictCursor)
+        try:
+            conn = _PGConn(pg_conn)
+            for stmt in PG_DDL.split(";"):
+                stmt = stmt.strip()
+                if stmt:
+                    conn.execute(stmt)
+            conn.execute(
+                "INSERT INTO streams (id, name, created_at) VALUES (%s, %s, NOW()) ON CONFLICT DO NOTHING",
+                (DEFAULT_STREAM_ID, DEFAULT_STREAM_NAME),
+            )
+            pg_conn.commit()
+        finally:
+            pg_conn.close()
+        return
+
+    # SQLite path (unchanged)
+    if db_path is None:
+        raise ValueError("db_path is required when DATABASE_URL is not set")
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(db_path) as conn:
         conn.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)")
@@ -136,6 +329,55 @@ def init_db(db_path: Path) -> None:
         else:
             conn.executescript(DDL)
         conn.commit()
+
+
+@contextmanager
+def get_conn(db_path: Path | None = None):
+    """Context-manager that yields a database connection.
+
+    Yields a ``_PGConn`` when DATABASE_URL is set, otherwise a standard
+    ``sqlite3.Connection`` with ``row_factory = sqlite3.Row``.
+    """
+    database_url = _get_database_url()
+
+    if database_url:
+        if not HAS_PG:
+            raise RuntimeError(
+                "DATABASE_URL is set but psycopg2 is not installed. "
+                "Install it with: pip install psycopg2-binary"
+            )
+        pg_conn = psycopg2.connect(database_url, cursor_factory=psycopg2.extras.RealDictCursor)
+        conn = _PGConn(pg_conn)
+        try:
+            yield conn
+            pg_conn.commit()
+        except Exception:
+            pg_conn.rollback()
+            raise
+        finally:
+            pg_conn.close()
+        return
+
+    # SQLite path (unchanged)
+    if db_path is None:
+        raise ValueError("db_path is required when DATABASE_URL is not set")
+    conn = sqlite3.connect(db_path, timeout=30)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA journal_mode = WAL")
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# SQLite migration helpers (unchanged, SQLite-only)
+# ---------------------------------------------------------------------------
 
 
 def _migrate(conn: sqlite3.Connection, from_version: int) -> None:
@@ -313,19 +555,3 @@ def _migrate_v6_to_v7(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_discord_reviews_link ON discord_reviews(link_id);
         CREATE INDEX IF NOT EXISTS idx_discord_reviews_stream ON discord_reviews(stream_id);
     """)
-
-
-@contextmanager
-def get_conn(db_path: Path):
-    conn = sqlite3.connect(db_path, timeout=30)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA journal_mode = WAL")
-    try:
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()

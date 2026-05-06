@@ -25,6 +25,7 @@ dependencies = [
 local-embeddings = ["sentence-transformers>=3.0"]
 web = ["fastapi>=0.100", "uvicorn>=0.20"]
 discord = ["discord.py>=2.3"]
+postgres = ["psycopg2-binary>=2.9"]
 dev = ["pytest>=8", "pytest-mock>=3.12", "ruff>=0.4"]
 
 [project.scripts]
