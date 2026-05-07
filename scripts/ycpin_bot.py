@@ -50,6 +50,9 @@ _CENTRAL = ZoneInfo("America/Chicago")
 
 KEEP_EMOJI = "⬆️"
 DISCARD_EMOJI = "⬇️"
+# Discord sometimes strips the variation selector (U+FE0F) from arrow emojis
+_KEEP_VARIANTS = {KEEP_EMOJI, "⬆"}
+_DISCARD_VARIANTS = {DISCARD_EMOJI, "⬇"}
 
 # Slot colors matching the web UI
 EMBED_COLOR = 0x6366F1  # indigo
@@ -229,10 +232,11 @@ class YCPinBot(discord.Client):
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
         if payload.user_id == self.user.id:
             return  # ignore bot's own reactions
-        if str(payload.emoji) not in (KEEP_EMOJI, DISCARD_EMOJI):
+        emoji_str = str(payload.emoji)
+        if emoji_str not in _KEEP_VARIANTS and emoji_str not in _DISCARD_VARIANTS:
             return
 
-        outcome = "kept" if str(payload.emoji) == KEEP_EMOJI else "discarded"
+        outcome = "kept" if emoji_str in _KEEP_VARIANTS else "discarded"
         link_id = _resolve_review(str(payload.message_id), outcome)
         if not link_id:
             return  # not our message or already resolved
