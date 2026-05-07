@@ -93,9 +93,7 @@ def _pick_link(stream_id: str) -> dict | None:
             FROM links l
             LEFT JOIN stats s ON s.link_id = l.id
             WHERE l.stream_id = ?
-              AND l.id NOT IN (
-                  SELECT link_id FROM discord_reviews WHERE outcome = 'discarded'
-              )
+              AND 1=1
             """,
             (stream_id, stream_id),
         ).fetchall()
@@ -251,8 +249,7 @@ class YCPinBot(discord.Client):
             return
 
         if outcome == "discarded":
-            _delete_link(link_id)
-            await msg.reply(f"⬇️ Downvoted and removed from Pinboard.")
+            pass  # just record the downvote, don't delete
 
         log.info(f"Link {link_id} → {outcome} by user {payload.user_id}")
 
@@ -277,7 +274,7 @@ class YCPinBot(discord.Client):
 
         link = _pick_link(self.stream_id)
         if not link:
-            await channel.send("📭 No links left to review! Everything's been upvoted or downvoted.")
+            await channel.send("📭 No links ready for review right now — check back later!")
             return False
 
         embed = _build_embed(link)
