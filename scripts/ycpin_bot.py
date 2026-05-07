@@ -48,8 +48,8 @@ STREAM_NAME = os.environ.get("YCPIN_STREAM", "Governance Studies")
 POST_HOUR_CENTRAL = int(os.environ.get("YCPIN_HOUR", "9"))
 _CENTRAL = ZoneInfo("America/Chicago")
 
-KEEP_EMOJI = "✅"
-DISCARD_EMOJI = "❌"
+KEEP_EMOJI = "⬆️"
+DISCARD_EMOJI = "⬇️"
 
 # Slot colors matching the web UI
 EMBED_COLOR = 0x6366F1  # indigo
@@ -248,9 +248,9 @@ class YCPinBot(discord.Client):
 
         if outcome == "discarded":
             _delete_link(link_id)
-            await msg.reply(f"❌ Discarded and removed from Pinboard.")
+            await msg.reply(f"⬇️ Downvoted and removed from Pinboard.")
         else:
-            await msg.reply(f"✅ Kept!")
+            await msg.reply(f"⬆️ Upvoted!")
 
         log.info(f"Link {link_id} → {outcome} by user {payload.user_id}")
 
@@ -275,12 +275,12 @@ class YCPinBot(discord.Client):
 
         link = _pick_link(self.stream_id)
         if not link:
-            await channel.send("📭 No links left to review! Everything's been kept or discarded.")
+            await channel.send("📭 No links left to review! Everything's been upvoted or downvoted.")
             return False
 
         embed = _build_embed(link)
         msg = await channel.send(
-            content="📖 **YCPin — Time to review a link from Governance Studies**\n✅ to keep this link  ·  ❌ to discard it",
+            content="📖 **YCPin — Time to review a link from Governance Studies**\n⬆️ upvote  ·  ⬇️ downvote (removes link)",
             embed=embed,
         )
         await msg.add_reaction(KEEP_EMOJI)
@@ -346,8 +346,8 @@ async def ycstats_command(interaction: discord.Interaction):
     embed = discord.Embed(title="📊 Governance Studies — Review Stats", color=EMBED_COLOR)
     embed.add_field(name="Total links", value=str(s["total"]), inline=True)
     embed.add_field(name="Unreviewed", value=str(s["unreviewed"]), inline=True)
-    embed.add_field(name="Kept", value=str(s["kept"]), inline=True)
-    embed.add_field(name="Discarded", value=str(s["discarded"]), inline=True)
+    embed.add_field(name="⬆️ Upvoted", value=str(s["kept"]), inline=True)
+    embed.add_field(name="⬇️ Downvoted", value=str(s["discarded"]), inline=True)
     await interaction.response.send_message(embed=embed)
 
 

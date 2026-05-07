@@ -306,11 +306,18 @@ function renderLinks() {
           <div class="flex items-start gap-3">
             <div class="flex-1 min-w-0">
 
-              <!-- Title -->
-              <a href="${esc(link.source || '#')}" target="_blank" rel="noopener"
-                class="text-sm font-semibold text-gray-900 hover:text-indigo-600 leading-snug block">
-                ${esc(link.title)}
-              </a>
+              <!-- Title + votes -->
+              <div class="flex items-baseline gap-2">
+                <a href="${esc(link.source || '#')}" target="_blank" rel="noopener"
+                  class="text-sm font-semibold text-gray-900 hover:text-indigo-600 leading-snug">
+                  ${esc(link.title)}
+                </a>
+                ${(link.upvotes || link.downvotes) ? `
+                <span class="flex items-center gap-1 text-xs shrink-0">
+                  <span class="text-emerald-600">▲ ${link.upvotes || 0}</span>
+                  <span class="text-red-400">▼ ${link.downvotes || 0}</span>
+                </span>` : ''}
+              </div>
 
               <!-- Summary -->
               ${hasSummary ? `<p class="text-xs text-gray-500 mt-1 line-clamp-2 leading-relaxed">${esc(link.summary)}</p>` : ''}

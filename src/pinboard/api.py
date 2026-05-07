@@ -79,9 +79,13 @@ def get_links(stream_id: str, page: int = 1, q: str = "", tag: str = "", limit: 
         rows = db.execute(
             f"""
             SELECT l.id, l.title, l.source, l.kind, l.created_at, l.posted_at,
-                   l.note, l.tags, l.content_text
+                   l.note, l.tags, l.content_text,
+                   COALESCE(SUM(CASE WHEN dr.outcome = 'kept' THEN 1 ELSE 0 END), 0) AS upvotes,
+                   COALESCE(SUM(CASE WHEN dr.outcome = 'discarded' THEN 1 ELSE 0 END), 0) AS downvotes
             FROM links l
+            LEFT JOIN discord_reviews dr ON dr.link_id = l.id
             WHERE {filters}
+            GROUP BY l.id
             ORDER BY COALESCE(l.posted_at, l.created_at) DESC
             LIMIT ? OFFSET ?
             """,
@@ -121,6 +125,8 @@ def get_links(stream_id: str, page: int = 1, q: str = "", tag: str = "", limit: 
                 "tags": tags,
                 "summary": summary,
                 "pinned": row["id"] in pinned_ids,
+                "upvotes": row["upvotes"],
+                "downvotes": row["downvotes"],
             })
 
         return {"items": items, "total": total, "page": page, "limit": limit}
