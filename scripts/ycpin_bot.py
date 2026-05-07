@@ -253,8 +253,6 @@ class YCPinBot(discord.Client):
         if outcome == "discarded":
             _delete_link(link_id)
             await msg.reply(f"⬇️ Downvoted and removed from Pinboard.")
-        else:
-            await msg.reply(f"⬆️ Upvoted!")
 
         log.info(f"Link {link_id} → {outcome} by user {payload.user_id}")
 
