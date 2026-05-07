@@ -248,8 +248,7 @@ class YCPinBot(discord.Client):
         except discord.NotFound:
             return
 
-        if outcome == "discarded":
-            pass  # just record the downvote, don't delete
+        pass  # reaction recorded silently
 
         log.info(f"Link {link_id} → {outcome} by user {payload.user_id}")
 
