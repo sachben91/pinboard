@@ -229,26 +229,21 @@ class YCPinBot(discord.Client):
 
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
         if payload.user_id == self.user.id:
-            return  # ignore bot's own reactions
+            return
         emoji_str = str(payload.emoji)
+        log.info(f"Reaction: {repr(emoji_str)} on msg {payload.message_id} by {payload.user_id}")
         if emoji_str not in _KEEP_VARIANTS and emoji_str not in _DISCARD_VARIANTS:
             return
 
         outcome = "kept" if emoji_str in _KEEP_VARIANTS else "discarded"
-        link_id = _resolve_review(str(payload.message_id), outcome)
-        if not link_id:
-            return  # not our message or already resolved
-
-        channel = self.get_channel(payload.channel_id)
-        if not channel:
-            return
-
         try:
-            msg = await channel.fetch_message(payload.message_id)
-        except discord.NotFound:
+            link_id = _resolve_review(str(payload.message_id), outcome)
+        except Exception as e:
+            log.error(f"_resolve_review failed: {e}")
             return
-
-        pass  # reaction recorded silently
+        if not link_id:
+            log.info(f"Message {payload.message_id} not in reviews or already resolved")
+            return
 
         log.info(f"Link {link_id} → {outcome} by user {payload.user_id}")
 
