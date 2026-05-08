@@ -27,6 +27,7 @@ from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from pathlib import Path
 
+import anthropic
 import discord
 from discord import app_commands
 from discord.ext import tasks
@@ -43,6 +44,7 @@ log = logging.getLogger("ycpin")
 # ── Config ────────────────────────────────────────────────────────────────
 
 TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 CHANNEL_ID = int(os.environ.get("DISCORD_CHANNEL_ID", "709454740614021121"))
 STREAM_NAME = os.environ.get("YCPIN_STREAM", "Governance Studies")
 POST_HOUR_CENTRAL = int(os.environ.get("YCPIN_HOUR", "9"))
@@ -271,7 +273,8 @@ class YCPinBot(discord.Client):
             await channel.send("📭 No links ready for review right now — check back later!")
             return False
 
-        embed = _build_embed(link)
+        summary = await _ai_summary(link)
+        embed = _build_embed(link, summary=summary)
         msg = await channel.send(
             content="📖 **YCPin — Time to review a link from Governance Studies**\n⬆️ upvote  ·  ⬇️ downvote (removes link)",
             embed=embed,
@@ -284,7 +287,36 @@ class YCPinBot(discord.Client):
         return True
 
 
-def _build_embed(link: dict) -> discord.Embed:
+async def _ai_summary(link: dict) -> str:
+    if not ANTHROPIC_API_KEY:
+        return link.get("summary", "")
+    try:
+        client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+        content_text = link.get("content_text") or ""
+        has_url = (link.get("source") or "").startswith(("http://", "https://"))
+        if content_text.strip():
+            prompt = (
+                f"Summarize this article in 2 concise sentences. "
+                f"Title: {link['title']}\n\n{content_text[:3000]}"
+            )
+        elif not has_url:
+            prompt = (
+                f"In 2 sentences, describe what this paper or work is about: \"{link['title']}\""
+            )
+        else:
+            return link.get("summary", "")
+        msg = await client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=120,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return msg.content[0].text.strip()
+    except Exception as e:
+        log.warning(f"AI summary failed: {e}")
+        return link.get("summary", "")
+
+
+def _build_embed(link: dict, summary: str = "") -> discord.Embed:
     source = link["source"] or ""
     url = source if source.startswith(("http://", "https://")) else None
     embed = discord.Embed(
@@ -292,8 +324,8 @@ def _build_embed(link: dict) -> discord.Embed:
         url=url,
         color=EMBED_COLOR,
     )
-    if link["summary"]:
-        embed.description = link["summary"]
+    if summary:
+        embed.description = summary
 
     footer_parts = []
     if link["posted_at"]:
