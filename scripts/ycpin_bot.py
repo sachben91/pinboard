@@ -13,6 +13,8 @@ Usage:
 Environment variables:
     DISCORD_BOT_TOKEN   — required
     DISCORD_CHANNEL_ID  — channel to post in (default: 709454740614021121)
+    YCPIN_THREAD_ID     — if set, post into this thread instead of the channel,
+                          keeping the parent channel uncrowded
     YCPIN_STREAM        — Pinboard stream name (default: Governance Studies)
     YCPIN_HOUR          — UTC hour to post daily (default: 9)
 """
@@ -46,6 +48,8 @@ log = logging.getLogger("ycpin")
 TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 CHANNEL_ID = int(os.environ.get("DISCORD_CHANNEL_ID", "709454740614021121"))
+_THREAD_ID_RAW = os.environ.get("YCPIN_THREAD_ID", "").strip()
+THREAD_ID = int(_THREAD_ID_RAW) if _THREAD_ID_RAW else None
 STREAM_NAME = os.environ.get("YCPIN_STREAM", "Governance Studies")
 POST_HOUR_CENTRAL = int(os.environ.get("YCPIN_HOUR", "9"))
 _CENTRAL = ZoneInfo("America/Chicago")
@@ -262,11 +266,15 @@ class YCPinBot(discord.Client):
     async def _post_review_link(self, channel_id: int | None = None) -> bool:
         if not self.stream_id:
             return False
-        cid = channel_id or CHANNEL_ID
+        cid = channel_id or THREAD_ID or CHANNEL_ID
         channel = self.get_channel(cid)
-        if not channel:
-            log.error(f"Channel {cid} not found.")
-            return False
+        if channel is None:
+            # Threads are often not cached — fetch them directly.
+            try:
+                channel = await self.fetch_channel(cid)
+            except Exception as e:
+                log.error(f"Channel/thread {cid} not found: {e}")
+                return False
 
         link = _pick_link(self.stream_id)
         if not link:
@@ -384,5 +392,6 @@ if __name__ == "__main__":
         sys.exit(1)
 
     init_db(DB_PATH)
-    log.info(f"Starting YCPin bot — posting to channel {CHANNEL_ID} at {POST_HOUR_CENTRAL}:00 Central daily")
+    target_desc = f"thread {THREAD_ID}" if THREAD_ID else f"channel {CHANNEL_ID}"
+    log.info(f"Starting YCPin bot — posting to {target_desc} at {POST_HOUR_CENTRAL}:00 Central daily")
     bot.run(TOKEN, log_handler=None)
